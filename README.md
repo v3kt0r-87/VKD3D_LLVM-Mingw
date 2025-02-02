@@ -1,11 +1,7 @@
-# vkd3d-proton
+# VKD3D_LLVM-Mingw
 
-vkd3d-proton is a fork of VKD3D, which aims to implement the full Direct3D 12 API on top of Vulkan.
-The project serves as the development effort for Direct3D 12 support in [Proton](https://github.com/ValveSoftware/Proton).
-
-## Upstream
-
-The original project is available at [WineHQ](https://gitlab.winehq.org/wine/vkd3d).
+## This is a fork of VKD3D, built using latest LLVM/Clang 
+VKD3D aims to implement the full Direct3D 12 API on top of Vulkan.
 
 ## Priorities
 
@@ -59,18 +55,15 @@ We have not done any testing against Intel GPUs yet.
 
 To clone the repo you should run:
 ```
-git clone --recursive https://github.com/HansKristian-Work/vkd3d-proton
+https://github.com/v3kt0r-87/VKD3D_LLVM-Mingw.git
 ```
 in order to pull in all the submodules which are needed for building.
 
 ## Building vkd3d-proton
 
 ### Requirements:
-- [wine](https://www.winehq.org/) (for `widl`) [for native builds]
-  - On Windows this may be substituted for [Strawberry Perl](http://strawberryperl.com/) as it ships `widl` and is easy to find and install -- although this dependency may be eliminated in the future.
 - [Meson](http://mesonbuild.com/) build system (at least version 0.49)
 - [glslang](https://github.com/KhronosGroup/glslang) compiler
-- [Mingw-w64](http://mingw-w64.org/) compiler, headers and tools (at least version 7.0) [for cross-builds for d3d12.dll which are default]
 
 ### Building:
 #### The simple way
@@ -89,31 +82,8 @@ In order to preserve the build directories for development, pass `--dev-build` t
 ninja -C /your/target/directory/build.64 install
 ```
 
-#### Compiling manually (cross for d3d12.dll, default)
-```
-# 64-bit build.
-meson --cross-file build-win64.txt --buildtype release --prefix /your/vkd3d-proton/directory build.64
-ninja -C build.64 install
 
-# 32-bit build
-meson --cross-file build-win32.txt --buildtype release --prefix /your/vkd3d-proton/directory build.86
-ninja -C build.86 install
-```
-
-#### Compiling manually (native)
-```
-# 64-bit build.
-meson --buildtype release --prefix /your/vkd3d-proton/directory build.64
-ninja -C build.64 install
-
-# 32-bit build
-CC="gcc -m32" CXX="g++ -m32" \
-PKG_CONFIG_PATH="/usr/lib32/pkgconfig:/usr/lib/i386-linux-gnu/pkgconfig:/usr/lib/pkgconfig" \
-meson --buildtype release --prefix /your/vkd3d-proton/directory build.86
-ninja -C build.86 install
-```
-
-## Using vkd3d-proton
+## Usage
 
 The intended way to use vkd3d-proton is as native Win32 DLLs (d3d12.dll and d3d12core.dll).
 These serve as a drop-in replacement for D3D12, and can be used in Wine (Proton or vanilla flavors), or on Windows.
@@ -121,7 +91,7 @@ These serve as a drop-in replacement for D3D12, and can be used in Wine (Proton 
 vkd3d-proton does not supply the necessary DXGI components on its own.
 Instead, DXVK (2.1+) and vkd3d-proton share a DXGI implementation.
 
-### A note on using vkd3d-proton on Windows
+### A note on using VKD3D on Windows
 
 Native Windows use is mostly relevant for developer testing purposes.
 Do not expect games running on Windows 7 or 8.1 to magically make use of vkd3d-proton,
