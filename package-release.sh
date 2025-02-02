@@ -9,6 +9,35 @@ if [ -z "$1" ] || [ -z "$2" ]; then
   exit 1
 fi
 
+install_llvm_mingw() {
+
+    # LLVM MinGW Setup
+    LLVM_MINGW_URL="https://github.com/v3kt0r-87/Clang-Stable/releases/download/llvm-migw-19.1.7/llvm-mingw.zip"
+    LLVM_MINGW_PATH="$(pwd)/llvm-mingw"
+
+
+    echo "Checking for LLVM MinGW..."
+
+    if [ ! -d "$LLVM_MINGW_PATH" ]; then
+
+        echo "LLVM MinGW not found! Downloading..."
+
+        wget -O llvm-mingw.zip "$LLVM_MINGW_URL"
+
+        unzip llvm-mingw.zip -d "$LLVM_MINGW_PATH"
+        rm llvm-mingw.zip
+
+        echo "LLVM MinGW installed successfully!"
+
+    else
+        echo "LLVM MinGW is already installed."
+    fi
+
+    export PATH="$(pwd)/llvm-mingw/bin:$PATH"
+}
+
+install_llvm_mingw
+
 VKD3D_VERSION="$1"
 VKD3D_SRC_DIR=$(dirname "$(readlink -f "$0")")
 VKD3D_BUILD_DIR=$(realpath "$2")"/vkd3d-proton-$VKD3D_VERSION"
@@ -57,11 +86,13 @@ function build_arch {
   cd "$VKD3D_SRC_DIR"
 
   meson setup "$@"                     \
+        --native-file "native.txt"     \
         --buildtype "${opt_buildtype}" \
         --prefix "$VKD3D_BUILD_DIR"    \
         $opt_strip                     \
         --bindir "x${arch}"            \
         --libdir "x${arch}"            \
+        -Db_lto=true                   \
         "$VKD3D_BUILD_DIR/build.${arch}"
 
   cd "$VKD3D_BUILD_DIR/build.${arch}"
