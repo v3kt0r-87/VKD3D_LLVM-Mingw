@@ -99,6 +99,7 @@ else
 endif
 
 add_project_arguments(vkd3d_compiler.get_supported_arguments([
+    '-flto=full',
     '-fvisibility=hidden',
     '-msse',
     '-msse2',
