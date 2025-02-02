@@ -1,5 +1,10 @@
 # VKD3D_LLVM-Mingw
 
+Built by: SHANKAR VALLABHAN (v3kt0r-87) 
+
+**Original Project:** [VKD3D](https://github.com/HansKristian-Work/vkd3d-proton)  
+
+
 ## This is a fork of VKD3D, built using latest LLVM/Clang 
 VKD3D aims to implement the full Direct3D 12 API on top of Vulkan.
 
