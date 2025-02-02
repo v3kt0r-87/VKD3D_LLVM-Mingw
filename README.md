@@ -75,13 +75,9 @@ Inside the vkd3d-proton directory, run:
 This will create a folder `vkd3d-master` in `/your/target/directory`, which contains both 32-bit and 64-bit versions of vkd3d-proton, which can be set up in the same way as the release versions as noted above.
 
 If you want to build natively (ie. for `libvkd3d-proton.so`), pass `--native` to the build script. This option will make it build using your system's compilers.
-
-In order to preserve the build directories for development, pass `--dev-build` to the script. This option implies `--no-package`. After making changes to the source code, you can then do the following to rebuild vkd3d-proton:
 ```
-# change to build.86 for 32-bit
-ninja -C /your/target/directory/build.64 install
+./package-release.sh master /your/target/directory --native
 ```
-
 
 ## Usage
 
