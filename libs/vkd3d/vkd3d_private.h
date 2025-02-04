@@ -2378,6 +2378,7 @@ HRESULT d3d12_cached_pipeline_state_validate(struct d3d12_device *device,
 bool d3d12_cached_pipeline_state_is_dummy(const struct d3d12_cached_pipeline_state *state);
 void vkd3d_pipeline_cache_compat_from_state_desc(struct vkd3d_pipeline_cache_compatibility *compat,
         const struct d3d12_pipeline_state_desc *desc);
+uint64_t vkd3d_pipeline_cache_compatibility_condense(const struct vkd3d_pipeline_cache_compatibility *compat);
 
 ULONG d3d12_pipeline_library_inc_public_ref(struct d3d12_pipeline_library *state);
 ULONG d3d12_pipeline_library_dec_public_ref(struct d3d12_pipeline_library *state);
@@ -4879,6 +4880,9 @@ enum vkd3d_queue_timeline_trace_state_type
     /* Time spent blocking in LowLatencySleep in user thread. */
     VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_LOW_LATENCY_SLEEP,
 
+    /* PSO compilation */
+    VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_PSO_COMPILATION,
+
     /* Reset() and Close() are useful instant events to see when command recording is happening and
      * which threads do so. */
     VKD3D_QUEUE_TIMELINE_TRACE_STATE_TYPE_COMMAND_LIST,
@@ -4955,6 +4959,8 @@ struct vkd3d_queue_timeline_trace_cookie
 vkd3d_queue_timeline_trace_register_low_latency_sleep(struct vkd3d_queue_timeline_trace *trace,
         uint64_t present_id);
 struct vkd3d_queue_timeline_trace_cookie
+vkd3d_queue_timeline_trace_register_pso_compile(struct vkd3d_queue_timeline_trace *trace);
+struct vkd3d_queue_timeline_trace_cookie
 vkd3d_queue_timeline_trace_register_sparse(struct vkd3d_queue_timeline_trace *trace, uint32_t num_tiles);
 struct vkd3d_queue_timeline_trace_cookie
 vkd3d_queue_timeline_trace_register_execute(struct vkd3d_queue_timeline_trace *trace,
@@ -4988,6 +4994,8 @@ void vkd3d_queue_timeline_trace_begin_execute_overhead(struct vkd3d_queue_timeli
         struct vkd3d_queue_timeline_trace_cookie cookie);
 void vkd3d_queue_timeline_trace_end_execute_overhead(struct vkd3d_queue_timeline_trace *trace,
         struct vkd3d_queue_timeline_trace_cookie cookie);
+void vkd3d_queue_timeline_trace_complete_pso_compile(struct vkd3d_queue_timeline_trace *trace,
+        struct vkd3d_queue_timeline_trace_cookie cookie, uint64_t pso_hash, const char *completion_kind);
 
 struct vkd3d_address_binding_report_buffer_info
 {
