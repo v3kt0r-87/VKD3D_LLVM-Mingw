@@ -77,6 +77,7 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(KHR_PRESENT_WAIT, KHR_present_wait),
     VK_EXTENSION(KHR_MAINTENANCE_5, KHR_maintenance5),
     VK_EXTENSION(KHR_MAINTENANCE_6, KHR_maintenance6),
+    VK_EXTENSION(KHR_MAINTENANCE_7, KHR_maintenance7),
     VK_EXTENSION(KHR_MAINTENANCE_8, KHR_maintenance8),
     VK_EXTENSION(KHR_SHADER_MAXIMAL_RECONVERGENCE, KHR_shader_maximal_reconvergence),
     VK_EXTENSION(KHR_SHADER_QUAD_CONTROL, KHR_shader_quad_control),
@@ -1581,7 +1582,11 @@ static void vkd3d_physical_device_info_apply_workarounds(struct vkd3d_physical_d
 static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *info, struct d3d12_device *device)
 {
     const struct vkd3d_vk_instance_procs *vk_procs = &device->vkd3d_instance->vk_procs;
+    VkPhysicalDeviceLayeredApiVulkanPropertiesKHR vk_layered_props;
+    VkPhysicalDeviceLayeredApiPropertiesListKHR layered_props_list;
     struct vkd3d_vulkan_info *vulkan_info = &device->vk_info;
+    VkPhysicalDeviceLayeredApiPropertiesKHR layered_props;
+    VkPhysicalDeviceDriverPropertiesKHR real_driver_props;
 
     memset(info, 0, sizeof(*info));
 
@@ -1844,6 +1849,33 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
         vk_prepend_struct(&info->properties2, &info->maintenance_6_properties);
     }
 
+    memset(&layered_props, 0, sizeof(layered_props));
+    memset(&layered_props_list, 0, sizeof(layered_props_list));
+    memset(&vk_layered_props, 0, sizeof(vk_layered_props));
+    memset(&real_driver_props, 0, sizeof(real_driver_props));
+
+    if (vulkan_info->KHR_maintenance7)
+    {
+        info->maintenance_7_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR;
+        info->maintenance_7_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_PROPERTIES_KHR;
+        vk_prepend_struct(&info->features2, &info->maintenance_7_features);
+        vk_prepend_struct(&info->properties2, &info->maintenance_7_properties);
+
+        layered_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_PROPERTIES_KHR;
+
+        /* assume a potentially single-layered implementation: at some point in the future it might be interesting to go deeper */
+        layered_props_list.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_PROPERTIES_LIST_KHR;
+        layered_props_list.layeredApiCount = 1;
+        layered_props_list.pLayeredApis = &layered_props;
+        vk_prepend_struct(&info->properties2, &layered_props_list);
+
+        vk_layered_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_VULKAN_PROPERTIES_KHR;
+        vk_prepend_struct(&layered_props, &vk_layered_props);
+
+        real_driver_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES_KHR;
+        vk_prepend_struct(&vk_layered_props.properties, &real_driver_props);
+    }
+
     if (vulkan_info->KHR_maintenance8)
     {
         info->maintenance_8_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR;
@@ -2008,6 +2040,15 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
 
     VK_CALL(vkGetPhysicalDeviceFeatures2(device->vk_physical_device, &info->features2));
     VK_CALL(vkGetPhysicalDeviceProperties2(device->vk_physical_device, &info->properties2));
+
+    /* if nonzero, this is a layered implementation */
+    if (real_driver_props.driverID)
+    {
+        /* store the layer ID here in case it's needed */
+        info->layer_driver_id = info->vulkan_1_2_properties.driverID;
+        /* swizzle the underlying driver ID here so everything else will use it */
+        info->vulkan_1_2_properties.driverID = real_driver_props.driverID;
+    }
 }
 
 static void vkd3d_trace_physical_device_properties(const VkPhysicalDeviceProperties *properties)
@@ -3087,6 +3128,31 @@ static void d3d12_device_init_workarounds(struct d3d12_device *device)
      * It's unknown which kernel version introduced it and when it will be fixed.
      * Only seems to affect very specific content which does not really rely on the NULL page behavior anyway. */
     device->workarounds.amdgpu_broken_null_tile_mapping = true;
+
+    /* IMRs should not have this workaround enabled or else perf will drop */
+    switch (device->device_info.vulkan_1_2_properties.driverID)
+    {
+        case VK_DRIVER_ID_IMAGINATION_PROPRIETARY:
+        case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
+        case VK_DRIVER_ID_ARM_PROPRIETARY:
+        case VK_DRIVER_ID_BROADCOM_PROPRIETARY:
+        case VK_DRIVER_ID_MESA_TURNIP:
+        case VK_DRIVER_ID_MESA_V3DV:
+        case VK_DRIVER_ID_MESA_PANVK:
+        case VK_DRIVER_ID_SAMSUNG_PROPRIETARY:
+        case VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA:
+        case VK_DRIVER_ID_MESA_HONEYKRISP:
+            device->workarounds.tiler_renderpass_barriers = true;
+            break;
+        /* layered implementations are handled transparently */
+        case VK_DRIVER_ID_MOLTENVK:
+        case VK_DRIVER_ID_JUICE_PROPRIETARY:
+        case VK_DRIVER_ID_MESA_VENUS:
+        case VK_DRIVER_ID_MESA_DOZEN:
+        case VK_DRIVER_ID_VULKAN_SC_EMULATION_ON_VULKAN:
+        default:
+            break;
+    }
 }
 
 static HRESULT vkd3d_create_vk_device(struct d3d12_device *device,
