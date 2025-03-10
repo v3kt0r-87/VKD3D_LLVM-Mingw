@@ -1353,7 +1353,11 @@ void test_vbv_stride_edge_cases(void)
         ID3D12GraphicsCommandList_RSSetViewports(context.list, 1, &vp);
         ID3D12GraphicsCommandList_RSSetScissorRects(context.list, 1, &rect);
         ID3D12GraphicsCommandList_IASetVertexBuffers(context.list, 0, 1, &vbv);
+        if (tests[i].stride && tests[i].stride < 16)
+            vkd3d_mute_validation_message("06209", "Intentionally testing murky D3D12 behavior");
         ID3D12GraphicsCommandList_DrawInstanced(context.list, 2, 1, 0, 0);
+        if (tests[i].stride && tests[i].stride < 16)
+            vkd3d_unmute_validation_message("06209");
     }
     transition_resource_state(context.list, xfb, D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_COPY_SOURCE);
 

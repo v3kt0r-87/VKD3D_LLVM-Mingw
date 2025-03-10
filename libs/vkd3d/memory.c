@@ -499,6 +499,7 @@ static void vkd3d_memory_transfer_queue_clear_allocation(struct vkd3d_memory_tra
         mapped_range.memory = allocation->device_allocation.vk_memory;
         mapped_range.offset = allocation->offset;
         mapped_range.size = allocation->resource.size;
+        vkd3d_mapped_memory_range_align(device, &mapped_range, allocation->device_allocation.size);
 
         /* Probably faster than doing this on the GPU
          * and having to worry about synchronization */
@@ -1296,6 +1297,7 @@ static HRESULT vkd3d_memory_allocation_init(struct vkd3d_memory_allocation *allo
         if (!device->memory_info.has_gpu_upload_heap)
         {
             ERR("Trying to allocate memory on GPU_UPLOAD_HEAP which is not supported on current device.\n");
+            VK_CALL(vkDestroyBuffer(device->vk_device, allocation->resource.vk_buffer, NULL));
             return E_INVALIDARG;
         }
 
