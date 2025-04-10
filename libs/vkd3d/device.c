@@ -627,6 +627,8 @@ static const struct vkd3d_instance_application_meta application_override[] = {
     /* Wreckfest 2 (1203190). Aliases block-compressed textures with color images on the
      * same heap and expects image data to be interpreted consistently. */
     { VKD3D_STRING_COMPARE_EXACT, "Wreckfest2.exe", VKD3D_CONFIG_FLAG_PLACED_TEXTURE_ALIASING, 0 },
+    /* Eve online. Uses DGC with CBV updates. Kinda questionable exename ... */
+    { VKD3D_STRING_COMPARE_EXACT, "exefile.exe", VKD3D_CONFIG_FLAG_FORCE_RAW_VA_CBV, 0 },
     /* Unreal Engine catch-all. ReBAR is a massive uplift on RX 7600 for example in Wukong.
      * AMD windows drivers also seem to have some kind of general app-opt for UE titles.
      * Use no-staggered-submit by default on UE. We've only observed issues in Wukong here, but
@@ -8414,9 +8416,11 @@ static void d3d12_device_caps_init_feature_options19(struct d3d12_device *device
     /* Requires SampleCount > 1 for pipelinesm, not just ForcedSamplecount */
     options19->SupportedSampleCountsWithNoOutputs = 0x1;
     /* D3D12 expectations w.r.t. rounding match Vulkan spec.
-     * However, both AMD and Intel native drivers round to even. RADV has no-trunc-coord workarounds. */
+     * However, both AMD and Intel native drivers round to even. RADV has no-trunc-coord workarounds.
+     * Turnip enables round-to-even behavior for vkd3d. */
     options19->PointSamplingAddressesNeverRoundUp =
-            device->device_info.vulkan_1_2_properties.driverID != VK_DRIVER_ID_MESA_RADV;
+            device->device_info.vulkan_1_2_properties.driverID != VK_DRIVER_ID_MESA_RADV &&
+            device->device_info.vulkan_1_2_properties.driverID != VK_DRIVER_ID_MESA_TURNIP;
     options19->RasterizerDesc2Supported = TRUE;
     /* We default to a line width of 1.0 anyway */
     options19->NarrowQuadrilateralLinesSupported = TRUE;
