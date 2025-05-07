@@ -263,6 +263,12 @@ HRESULT vkd3d_create_buffer(struct d3d12_device *device,
     if (desc->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
         FIXME("Unsupported resource flags %#x.\n", desc->Flags);
 
+    if (desc->Width > device->device_info.vulkan_1_3_properties.maxBufferSize)
+    {
+        FIXME("Buffer size %"PRIu64" exceeds maxBufferSize of %"PRIu64".\n",
+                desc->Width, device->device_info.vulkan_1_3_properties.maxBufferSize);
+    }
+
     /* In case we get address binding callbacks, ensure driver knows it's not a sparse bind that happens async. */
     vkd3d_address_binding_tracker_mark_user_thread();
 
@@ -4689,7 +4695,7 @@ bool vkd3d_create_acceleration_structure_view(struct d3d12_device *device, const
 
 static void vkd3d_get_metadata_buffer_view_for_resource(struct d3d12_device *device,
         struct d3d12_resource *resource, DXGI_FORMAT view_format,
-        unsigned int offset, unsigned int size, unsigned int structure_stride,
+        VkDeviceSize offset, VkDeviceSize size, VkDeviceSize structure_stride,
         struct vkd3d_descriptor_metadata_buffer_view *view)
 {
     VkDeviceSize element_size;
@@ -4710,7 +4716,7 @@ static void vkd3d_get_metadata_buffer_view_for_resource(struct d3d12_device *dev
 
 static bool vkd3d_create_buffer_view_for_resource(struct d3d12_device *device,
         struct d3d12_resource *resource, DXGI_FORMAT view_format,
-        unsigned int offset, unsigned int size, unsigned int structure_stride,
+        VkDeviceSize offset, VkDeviceSize size, VkDeviceSize structure_stride,
         unsigned int flags, struct vkd3d_view **view)
 {
     const struct vkd3d_format *format;

@@ -68,6 +68,9 @@
 
 #define VKD3D_TILE_SIZE (65536ull)
 
+/* Minimum required maxBufferSize in Vulkan */
+#define VKD3D_MAX_FILL_BUFFER_SIZE (1ull << 30)
+
 typedef ID3D12Fence1 d3d12_fence_iface;
 
 struct d3d12_command_list;
@@ -1026,6 +1029,7 @@ struct vkd3d_format_compatibility_list
     unsigned int format_count;
     VkFormat vk_formats[VKD3D_MAX_COMPATIBLE_FORMAT_COUNT];
     DXGI_FORMAT uint_format;
+    DXGI_FORMAT typeless_format;
 };
 
 /* ID3D12Resource */

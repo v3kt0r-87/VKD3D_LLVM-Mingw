@@ -1913,6 +1913,13 @@ static void d3d12_init_pipeline_state_desc(struct d3d12_pipeline_state_desc *des
     desc->sample_mask = D3D12_DEFAULT_SAMPLE_MASK;
 }
 
+static void vkd3d_pipeline_state_desc_fixup(struct d3d12_pipeline_state_desc *desc)
+{
+    /* Older runtimes validated this, but more recent runtimes seem to just allow it and it "just works". */
+    if (desc->hs.BytecodeLength)
+        desc->primitive_topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+}
+
 HRESULT vkd3d_pipeline_state_desc_from_d3d12_graphics_desc(struct d3d12_pipeline_state_desc *desc,
         const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d3d12_desc)
 {
@@ -1942,6 +1949,9 @@ HRESULT vkd3d_pipeline_state_desc_from_d3d12_graphics_desc(struct d3d12_pipeline
     desc->cached_pso.blob = d3d12_desc->CachedPSO;
     desc->cached_pso.library = NULL;
     desc->flags = d3d12_desc->Flags;
+
+    vkd3d_pipeline_state_desc_fixup(desc);
+
     return S_OK;
 }
 
@@ -2116,6 +2126,8 @@ HRESULT vkd3d_pipeline_state_desc_from_d3d12_stream_desc(struct d3d12_pipeline_s
         ERR("Invalid combination of shader stages 0x%#x.\n", defined_stages);
         return E_INVALIDARG;
     }
+
+    vkd3d_pipeline_state_desc_fixup(desc);
 
     return S_OK;
 }
@@ -6253,7 +6265,7 @@ VkPipeline d3d12_pipeline_state_get_pipeline(struct d3d12_pipeline_state *state,
     {
         if (graphics->patch_vertex_count)
         {
-            WARN("Mismatch in tessellation control points, expected %u, but got %u, ignoring app topology and using shader.\n",
+            WARN("Mismatch in tessellation control points, expected %u, but got %u, ignoring shader topology and using app.\n",
                   graphics->patch_vertex_count,
                   dyn_state->primitive_topology - D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + 1);
         }

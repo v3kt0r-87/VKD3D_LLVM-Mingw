@@ -4206,6 +4206,75 @@ bool d3d12_device_is_uma(struct d3d12_device *device, bool *coherent)
     return true;
 }
 
+static DXGI_FORMAT d3d12_device_get_typeless_format(struct d3d12_device *device, DXGI_FORMAT format)
+{
+    if (format < device->format_compatibility_list_count)
+        return device->format_compatibility_lists[format].typeless_format;
+
+    return DXGI_FORMAT_UNKNOWN;
+}
+
+static UINT d3d12_device_get_format_displayable_features(struct d3d12_device *device, DXGI_FORMAT format)
+{
+    DXGI_FORMAT typeless_format;
+    unsigned int i;
+    UINT flags;
+
+    /* Exhaustive list of all swapchain formats */
+    static const DXGI_FORMAT displayable_formats[] =
+    {
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+        DXGI_FORMAT_R10G10B10A2_UNORM,
+        DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+    };
+
+    typeless_format = d3d12_device_get_typeless_format(device, format);
+    flags = 0u;
+
+    for (i = 0; i < ARRAY_SIZE(displayable_formats); i++)
+    {
+        if (displayable_formats[i] == format)
+            flags |= D3D12_FORMAT_SUPPORT1_DISPLAY;
+        else if (typeless_format && d3d12_device_get_typeless_format(device, displayable_formats[i]) == typeless_format)
+            flags |= D3D12_FORMAT_SUPPORT1_BACK_BUFFER_CAST;
+    }
+
+    return (flags & D3D12_FORMAT_SUPPORT1_DISPLAY) ? flags : 0u;
+}
+
+static bool d3d12_format_is_streamout_compatible(DXGI_FORMAT format)
+{
+    unsigned int i;
+
+    static const DXGI_FORMAT so_formats[] =
+    {
+        DXGI_FORMAT_R32G32B32A32_UINT,
+        DXGI_FORMAT_R32G32B32A32_SINT,
+        DXGI_FORMAT_R32G32B32A32_FLOAT,
+        DXGI_FORMAT_R32G32B32_UINT,
+        DXGI_FORMAT_R32G32B32_SINT,
+        DXGI_FORMAT_R32G32B32_FLOAT,
+        DXGI_FORMAT_R32G32_UINT,
+        DXGI_FORMAT_R32G32_SINT,
+        DXGI_FORMAT_R32G32_FLOAT,
+        DXGI_FORMAT_R32_UINT,
+        DXGI_FORMAT_R32_SINT,
+        DXGI_FORMAT_R32_FLOAT,
+    };
+
+    for (i = 0; i < ARRAY_SIZE(so_formats); i++)
+    {
+        if (so_formats[i] == format)
+            return true;
+    }
+
+    return false;
+}
+
 static HRESULT d3d12_device_get_format_support(struct d3d12_device *device, D3D12_FEATURE_DATA_FORMAT_SUPPORT *data)
 {
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
@@ -4258,6 +4327,10 @@ static HRESULT d3d12_device_get_format_support(struct d3d12_device *device, D3D1
         data->Support1 |= D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER;
     if (data->Format == DXGI_FORMAT_R16_UINT || data->Format == DXGI_FORMAT_R32_UINT)
         data->Support1 |= D3D12_FORMAT_SUPPORT1_IA_INDEX_BUFFER;
+
+    if (d3d12_format_is_streamout_compatible(data->Format))
+        data->Support1 |= D3D12_FORMAT_SUPPORT1_SO_BUFFER;
+
     if (image_features)
     {
         data->Support1 |= D3D12_FORMAT_SUPPORT1_TEXTURE2D;
@@ -4269,6 +4342,12 @@ static HRESULT d3d12_device_get_format_support(struct d3d12_device *device, D3D1
         /* 3D depth-stencil images are not supported */
         if (format->vk_aspect_mask & VK_IMAGE_ASPECT_COLOR_BIT)
             data->Support1 |= D3D12_FORMAT_SUPPORT1_TEXTURE3D;
+
+        if (format->dxgi_format < device->format_compatibility_list_count &&
+                device->format_compatibility_lists[format->dxgi_format].typeless_format)
+            data->Support1 |= D3D12_FORMAT_SUPPORT1_CAST_WITHIN_BIT_LAYOUT;
+
+        data->Support1 |= d3d12_device_get_format_displayable_features(device, format->dxgi_format);
     }
     if (image_features & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)
     {
@@ -6237,14 +6316,15 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_OpenSharedHandle(d3d12_device_ifac
             return E_INVALIDARG;
         }
 
+        memset(&desc, 0, sizeof(desc));
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        desc.Alignment = 0;
         desc.Width = metadata.Width;
         desc.Height = metadata.Height;
         desc.DepthOrArraySize = metadata.ArraySize;
         desc.MipLevels = metadata.MipLevels;
         desc.Format = metadata.Format;
         desc.SampleDesc = metadata.SampleDesc;
+
         switch (metadata.TextureLayout)
         {
             case D3D11_TEXTURE_LAYOUT_UNDEFINED: desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN; break;
@@ -6252,15 +6332,23 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_OpenSharedHandle(d3d12_device_ifac
             case D3D11_TEXTURE_LAYOUT_64K_STANDARD_SWIZZLE: desc.Layout = D3D12_TEXTURE_LAYOUT_64KB_STANDARD_SWIZZLE; break;
             default: desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
         }
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+
         if (metadata.BindFlags & D3D11_BIND_RENDER_TARGET)
             desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
         if (metadata.BindFlags & D3D11_BIND_DEPTH_STENCIL)
+        {
             desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+            if (!(metadata.BindFlags & D3D11_BIND_SHADER_RESOURCE))
+                desc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+        }
+        else
+            desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+
         if (metadata.BindFlags & D3D11_BIND_UNORDERED_ACCESS)
             desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        if ((metadata.BindFlags & D3D11_BIND_DEPTH_STENCIL) && !(metadata.BindFlags & D3D11_BIND_SHADER_RESOURCE))
-            desc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+
         desc.SamplerFeedbackMipRegion.Width = 0;
         desc.SamplerFeedbackMipRegion.Height = 0;
         desc.SamplerFeedbackMipRegion.Depth = 0;
@@ -8375,8 +8463,11 @@ static void d3d12_device_caps_init_feature_options13(struct d3d12_device *device
 {
     D3D12_FEATURE_DATA_D3D12_OPTIONS13 *options13 = &device->d3d12_caps.options13;
 
+    options13->UnrestrictedBufferTextureCopyPitchSupported = TRUE;
     options13->InvertedViewportHeightFlipsYSupported = TRUE;
     options13->InvertedViewportDepthFlipsZSupported = TRUE;
+    options13->TextureCopyBetweenDimensionsSupported = TRUE;
+    options13->AlphaBlendFactorSupported = TRUE;
 }
 
 static void d3d12_device_caps_init_feature_options14(struct d3d12_device *device)
