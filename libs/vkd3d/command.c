@@ -13288,6 +13288,7 @@ static void STDMETHODCALLTYPE d3d12_command_list_SetPredication(d3d12_command_li
              * so we will need a fallback there where we read from the
              * predicate VA. INDIRECT_ACCESS barriers on Mesa imply SCACHE/VCACHE anyway, so this does not really hurt us. */
             if (!(vkd3d_config_flags & VKD3D_CONFIG_FLAG_SKIP_DRIVER_WORKAROUNDS) &&
+                    !list->device->device_info.device_generated_commands_features_ext.deviceGeneratedCommands &&
                     list->device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MESA_RADV)
             {
                 vk_barrier.dstStageMask |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -13634,7 +13635,7 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
     VkPipeline current_pipeline;
     VkDependencyInfo dep_info;
     VkMemoryBarrier2 barrier;
-    bool suspend_predication;
+    bool restart_predication;
     bool explicit_preprocess;
     bool require_ibo_update;
     bool require_patch;
@@ -13645,7 +13646,7 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
 
     use_ext_dgc = list->device->device_info.device_generated_commands_features_ext.deviceGeneratedCommands;
     require_custom_predication = false;
-    suspend_predication = false;
+    restart_predication = false;
     explicit_preprocess = false;
 
     if (list->predication.va)
@@ -13654,12 +13655,13 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
          * It does not work on RADV yet, so we'll fold predication in with our optimization work which
          * generates a predicate anyway. */
         if (!(vkd3d_config_flags & VKD3D_CONFIG_FLAG_SKIP_DRIVER_WORKAROUNDS) &&
+                !list->device->device_info.device_generated_commands_features_ext.deviceGeneratedCommands &&
                 list->device->device_info.vulkan_1_2_properties.driverID == VK_DRIVER_ID_MESA_RADV)
         {
             union vkd3d_predicate_command_direct_args args;
             enum vkd3d_predicate_command_type type;
             VkDeviceAddress count_va;
-            suspend_predication = list->predication.enabled_on_command_buffer;
+            restart_predication = list->predication.enabled_on_command_buffer;
 
             if (count_buffer)
             {
@@ -13671,6 +13673,13 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
                 count_va = 0;
                 type = VKD3D_PREDICATE_COMMAND_DRAW_INDIRECT;
                 args.draw_count = max_command_count;
+            }
+
+            if (restart_predication)
+            {
+                /* Have to begin/end predication outside a render pass. */
+                d3d12_command_list_end_current_render_pass(list, true);
+                VK_CALL(vkCmdEndConditionalRenderingEXT(list->cmd.vk_command_buffer));
             }
 
             d3d12_command_list_emit_predicated_command(list, type, count_va, &args, &predication_allocation);
@@ -13730,13 +13739,6 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
         d3d12_command_list_consider_new_sequence(list);
         if (list->cmd.vk_command_buffer != list->cmd.vk_init_commands_post_indirect_barrier)
             explicit_preprocess = true;
-    }
-
-    if (suspend_predication)
-    {
-        /* Have to begin/end predication outside a render pass. */
-        d3d12_command_list_end_current_render_pass(list, true);
-        VK_CALL(vkCmdEndConditionalRenderingEXT(list->cmd.vk_command_buffer));
     }
 
     /* To build device generated commands, we need to know the pipeline we're going to render with. */
@@ -14027,9 +14029,15 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
     {
         d3d12_command_allocator_allocate_init_post_indirect_command_buffer(list->allocator, list);
 
-        if (!use_ext_dgc)
+        if (use_ext_dgc)
         {
-            /* NV_dgc requires that state in recording command buffer matches, but EXT_dgc provides a state cmd. */
+            VK_CALL(vkCmdPreprocessGeneratedCommandsEXT(list->cmd.vk_init_commands_post_indirect_barrier,
+                    &generated_ext, list->cmd.vk_command_buffer));
+        }
+        else
+        {
+            /* With graphics NV_dgc, there are no requirements on bound state, except for pipeline. */
+            /* NV_dgcc however requires that state in recording command buffer matches, but EXT_dgc provides a state cmd. */
             VK_CALL(vkCmdBindPipeline(list->cmd.vk_init_commands_post_indirect_barrier,
                     signature->pipeline_type == VKD3D_PIPELINE_TYPE_COMPUTE ?
                             VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS, current_pipeline));
@@ -14039,33 +14047,28 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
                 /* Compute is a bit more stringent, we have to bind all state. */
                 d3d12_command_list_update_descriptors_post_indirect_buffer(list);
             }
-        }
 
-        /* Predication state also has to match. Also useful to nop out explicit preprocess too. */
-        if (list->predication.enabled_on_command_buffer)
-        {
-            conditional_begin_info.sType = VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT;
-            conditional_begin_info.pNext = NULL;
-            conditional_begin_info.buffer = list->predication.vk_buffer;
-            conditional_begin_info.offset = list->predication.vk_buffer_offset;
-            conditional_begin_info.flags = 0;
-            VK_CALL(vkCmdBeginConditionalRenderingEXT(list->cmd.vk_init_commands_post_indirect_barrier,
-                    &conditional_begin_info));
-        }
+            /* Predication state also has to match. Also useful to nop out explicit preprocess too.
+             * Assumption is that drivers will pull predication state from state command buffer on EXT,
+             * since states have to match. */
+            if (list->predication.enabled_on_command_buffer)
+            {
+                conditional_begin_info.sType = VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT;
+                conditional_begin_info.pNext = NULL;
+                conditional_begin_info.buffer = list->predication.vk_buffer;
+                conditional_begin_info.offset = list->predication.vk_buffer_offset;
+                conditional_begin_info.flags = 0;
+                VK_CALL(vkCmdBeginConditionalRenderingEXT(list->cmd.vk_init_commands_post_indirect_barrier,
+                        &conditional_begin_info));
+            }
 
-        /* There are no requirements on bound state, except for pipeline. */
-        if (use_ext_dgc)
-        {
-            VK_CALL(vkCmdPreprocessGeneratedCommandsEXT(list->cmd.vk_init_commands_post_indirect_barrier,
-                    &generated_ext, list->cmd.vk_command_buffer));
-        }
-        else
             VK_CALL(vkCmdPreprocessGeneratedCommandsNV(list->cmd.vk_init_commands_post_indirect_barrier, &generated_nv));
 
-        list->cmd.indirect_meta->need_preprocess_barrier = true;
+            if (list->predication.enabled_on_command_buffer)
+                VK_CALL(vkCmdEndConditionalRenderingEXT(list->cmd.vk_init_commands_post_indirect_barrier));
+        }
 
-        if (list->predication.enabled_on_command_buffer)
-            VK_CALL(vkCmdEndConditionalRenderingEXT(list->cmd.vk_init_commands_post_indirect_barrier));
+        list->cmd.indirect_meta->need_preprocess_barrier = true;
     }
 
     if (require_patch)
@@ -14165,7 +14168,7 @@ static void d3d12_command_list_execute_indirect_state_template_dgc(
      * Treat it as a meta shader. We need to nuke all state after running execute generated commands. */
     d3d12_command_list_invalidate_all_state(list);
 
-    if (suspend_predication)
+    if (restart_predication)
     {
         /* Have to begin/end predication outside a render pass. */
         d3d12_command_list_end_current_render_pass(list, true);
@@ -21639,6 +21642,8 @@ bool vk_image_memory_barrier_for_initial_transition(const struct d3d12_resource 
 
     memset(barrier, 0, sizeof(*barrier));
     barrier->sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier->oldLayout = (resource->flags & VKD3D_RESOURCE_ZERO_INITIALIZED) ?
+            VK_IMAGE_LAYOUT_ZERO_INITIALIZED_EXT : VK_IMAGE_LAYOUT_UNDEFINED;
     barrier->newLayout = vk_image_layout_from_d3d12_resource_state(NULL, resource, resource->initial_state);
     barrier->srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier->dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;

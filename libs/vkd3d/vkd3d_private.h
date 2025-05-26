@@ -139,6 +139,7 @@ struct vkd3d_vulkan_info
     bool KHR_shader_quad_control;
     bool KHR_compute_shader_derivatives;
     bool KHR_calibrated_timestamps;
+    bool KHR_cooperative_matrix;
     /* EXT device extensions */
     bool EXT_conditional_rendering;
     bool EXT_conservative_rasterization;
@@ -172,6 +173,7 @@ struct vkd3d_vulkan_info
     bool EXT_memory_budget;
     bool EXT_device_address_binding_report;
     bool EXT_depth_bias_control;
+    bool EXT_zero_initialize_device_memory;
     /* AMD device extensions */
     bool AMD_buffer_marker;
     bool AMD_device_coherent_memory;
@@ -827,17 +829,23 @@ enum vkd3d_memory_transfer_op
 {
     VKD3D_MEMORY_TRANSFER_OP_CLEAR_ALLOCATION,
     VKD3D_MEMORY_TRANSFER_OP_WRITE_SUBRESOURCE,
+    VKD3D_MEMORY_TRANSFER_OP_BUILD_NULL_RTAS,
+    VKD3D_MEMORY_TRANSFER_OP_DEBUG_FILL_ALLOCATION
 };
 
 struct vkd3d_memory_transfer_info
 {
     enum vkd3d_memory_transfer_op op;
-    struct vkd3d_memory_allocation *allocation;
+
+    VkBuffer vk_buffer;
+    VkDeviceSize vk_buffer_offset;
+    VkDeviceSize vk_buffer_size;
 
     struct d3d12_resource *resource;
     uint32_t subresource_idx;
     VkOffset3D offset;
     VkExtent3D extent;
+    uint32_t fill_value;
 };
 
 struct vkd3d_memory_transfer_tracked_resource
@@ -879,6 +887,7 @@ HRESULT vkd3d_memory_transfer_queue_init(struct vkd3d_memory_transfer_queue *que
 HRESULT vkd3d_memory_transfer_queue_flush(struct vkd3d_memory_transfer_queue *queue);
 HRESULT vkd3d_memory_transfer_queue_write_subresource(struct vkd3d_memory_transfer_queue *queue,
         struct d3d12_resource *resource, uint32_t subresource_idx, VkOffset3D offset, VkExtent3D extent);
+HRESULT vkd3d_memory_transfer_queue_build_empty_rtas(struct vkd3d_memory_transfer_queue *queue);
 
 struct vkd3d_memory_allocator
 {
@@ -964,6 +973,7 @@ enum vkd3d_resource_flag
     VKD3D_RESOURCE_EXTERNAL               = (1u << 5),
     VKD3D_RESOURCE_ACCELERATION_STRUCTURE = (1u << 6),
     VKD3D_RESOURCE_GENERAL_LAYOUT         = (1u << 7),
+    VKD3D_RESOURCE_ZERO_INITIALIZED       = (1u << 8)
 };
 
 #define VKD3D_INVALID_TILE_INDEX (~0u)
@@ -4445,7 +4455,7 @@ struct vkd3d_execute_indirect_ops
     pthread_mutex_t mutex;
 };
 
-struct vkd3d_dstorage_emit_nv_memory_decompression_regions_args
+struct vkd3d_dstorage_decompress_args
 {
     VkDeviceAddress control_va;
     VkDeviceAddress src_buffer_va;
@@ -4457,9 +4467,13 @@ struct vkd3d_dstorage_emit_nv_memory_decompression_regions_args
 
 struct vkd3d_dstorage_ops
 {
-    VkPipelineLayout vk_emit_nv_memory_decompression_regions_layout;
+    VkPipelineLayout vk_dstorage_layout;
+
     VkPipeline vk_emit_nv_memory_decompression_regions_pipeline;
     VkPipeline vk_emit_nv_memory_decompression_workgroups_pipeline;
+
+    VkPipeline vk_gdeflate_prepare_pipeline;
+    VkPipeline vk_gdeflate_pipeline;
 };
 
 struct vkd3d_meta_ops_common
@@ -4700,6 +4714,7 @@ struct vkd3d_physical_device_info
     VkDriverId layer_driver_id;
     VkPhysicalDeviceLineRasterizationPropertiesEXT line_rasterization_properties;
     VkPhysicalDeviceComputeShaderDerivativesPropertiesKHR compute_shader_derivatives_properties_khr;
+    VkPhysicalDeviceCooperativeMatrixPropertiesKHR cooperative_matrix_properties;
 
     VkPhysicalDeviceProperties2KHR properties2;
 
@@ -4759,6 +4774,8 @@ struct vkd3d_physical_device_info
     VkPhysicalDeviceImageAlignmentControlPropertiesMESA image_alignment_control_properties;
     VkPhysicalDeviceDepthBiasControlFeaturesEXT depth_bias_control_features;
     VkPhysicalDeviceOpticalFlowFeaturesNV optical_flow_nv_features;
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperative_matrix_features;
+    VkPhysicalDeviceZeroInitializeDeviceMemoryFeaturesEXT zero_initialize_device_memory_features;
 
     VkPhysicalDeviceFeatures2 features2;
 
@@ -5095,6 +5112,15 @@ static inline bool vkd3d_address_binding_tracker_active(struct vkd3d_address_bin
     return tracker->messenger != VK_NULL_HANDLE;
 }
 
+struct vkd3d_null_rtas_allocation
+{
+    VkDeviceAddress va;
+    VkBuffer buffer;
+    VkAccelerationStructureKHR rtas;
+    struct vkd3d_device_memory_allocation alloc;
+    spinlock_t lock;
+};
+
 struct d3d12_device
 {
     d3d12_device_iface ID3D12Device_iface;
@@ -5133,6 +5159,7 @@ struct d3d12_device
 
     struct vkd3d_memory_transfer_queue memory_transfers;
     struct vkd3d_memory_allocator memory_allocator;
+    struct vkd3d_null_rtas_allocation null_rtas_allocation;
 
     struct vkd3d_queue *internal_sparse_queue;
     VkSemaphore sparse_init_timeline;
@@ -5731,6 +5758,12 @@ bool vkd3d_enumerate_meta_command_parameters(struct d3d12_device *device, REFGUI
 HRESULT d3d12_meta_command_create(struct d3d12_device *device, REFGUID guid,
         const void *parameters, size_t parameter_size, struct d3d12_meta_command **meta_command);
 
+static inline bool d3d12_device_use_nv_memory_decompression(struct d3d12_device *device)
+{
+    return device->device_info.memory_decompression_features.memoryDecompression &&
+            (device->device_info.memory_decompression_properties.decompressionMethods & VK_MEMORY_DECOMPRESSION_METHOD_GDEFLATE_1_0_BIT_NV);
+}
+
 /* utils */
 struct vkd3d_format_footprint
 {
@@ -6031,6 +6064,8 @@ static inline void vkd3d_get_depth_bias_representation(VkDepthBiasRepresentation
 VkDeviceAddress vkd3d_get_buffer_device_address(struct d3d12_device *device, VkBuffer vk_buffer);
 VkDeviceAddress vkd3d_get_acceleration_structure_device_address(struct d3d12_device *device,
         VkAccelerationStructureKHR vk_acceleration_structure);
+D3D12_GPU_VIRTUAL_ADDRESS vkd3d_get_null_rtas_va(struct d3d12_device *device);
+void vkd3d_build_null_rtas_va(struct d3d12_device *device, VkCommandBuffer vk_cmd_buffer);
 
 static inline unsigned int vkd3d_compute_workgroup_count(unsigned int thread_count, unsigned int workgroup_size)
 {

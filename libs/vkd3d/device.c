@@ -83,6 +83,7 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(KHR_SHADER_QUAD_CONTROL, KHR_shader_quad_control),
     VK_EXTENSION(KHR_COMPUTE_SHADER_DERIVATIVES, KHR_compute_shader_derivatives),
     VK_EXTENSION(KHR_CALIBRATED_TIMESTAMPS, KHR_calibrated_timestamps),
+    VK_EXTENSION(KHR_COOPERATIVE_MATRIX, KHR_cooperative_matrix),
 #ifdef _WIN32
     VK_EXTENSION(KHR_EXTERNAL_MEMORY_WIN32, KHR_external_memory_win32),
     VK_EXTENSION(KHR_EXTERNAL_SEMAPHORE_WIN32, KHR_external_semaphore_win32),
@@ -120,6 +121,7 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(EXT_MEMORY_BUDGET, EXT_memory_budget),
     VK_EXTENSION_COND(EXT_DEVICE_ADDRESS_BINDING_REPORT, EXT_device_address_binding_report, VKD3D_CONFIG_FLAG_FAULT),
     VK_EXTENSION(EXT_DEPTH_BIAS_CONTROL, EXT_depth_bias_control),
+    VK_EXTENSION(EXT_ZERO_INITIALIZE_DEVICE_MEMORY, EXT_zero_initialize_device_memory),
     /* AMD extensions */
     VK_EXTENSION(AMD_BUFFER_MARKER, AMD_buffer_marker),
     VK_EXTENSION(AMD_DEVICE_COHERENT_MEMORY, AMD_device_coherent_memory),
@@ -607,8 +609,6 @@ static const struct vkd3d_instance_application_meta application_override[] = {
     /* Star Wars Outlaws (2842040). Attempt to workaround a possible NV driver bug. */
     { VKD3D_STRING_COMPARE_EXACT, "Outlaws.exe", VKD3D_CONFIG_FLAG_ONE_TIME_SUBMIT, 0 },
     { VKD3D_STRING_COMPARE_EXACT, "Outlaws_Plus.exe", VKD3D_CONFIG_FLAG_ONE_TIME_SUBMIT, 0 },
-    /* ArmA Reforger suffers from slow asset loading with HVV enabled */
-    { VKD3D_STRING_COMPARE_STARTS_WITH, "ArmaReforger", VKD3D_CONFIG_FLAG_NO_UPLOAD_HVV },
     /* FFVII Rebirth (2909400).
      * Game can destroy PSOs while they are in-flight.
      * Also, add no-staggered since this is a UE title without the common workaround,
@@ -636,6 +636,8 @@ static const struct vkd3d_instance_application_meta application_override[] = {
      * we'll disable for now to be defensive and de-risk any large scale regressions. */
     { VKD3D_STRING_COMPARE_ENDS_WITH, "-Win64-Shipping.exe",
             VKD3D_CONFIG_FLAG_SMALL_VRAM_REBAR | VKD3D_CONFIG_FLAG_NO_STAGGERED_SUBMIT, 0 },
+    /* Rise of the Tomb Raider. Game renders and samples a texture at the same time */
+    { VKD3D_STRING_COMPARE_EXACT, "ROTTR.exe", VKD3D_CONFIG_FLAG_DISABLE_COLOR_COMPRESSION, 0 },
     { VKD3D_STRING_COMPARE_NEVER, NULL, 0, 0 }
 };
 
@@ -866,6 +868,7 @@ static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
     { VKD3D_STRING_COMPARE_EXACT, "MonsterHunterWilds.exe", &heap_robustness_quirks },
     /* Satisfactory (526870). */
     { VKD3D_STRING_COMPARE_EXACT, "FactoryGameSteam-Win64-Shipping.exe", &satisfactory_quirks },
+    { VKD3D_STRING_COMPARE_EXACT, "FactoryGameEGS-Win64-Shipping.exe", &satisfactory_quirks },
     /* Unreal Engine 4 */
     { VKD3D_STRING_COMPARE_ENDS_WITH, "-Shipping.exe", &ue4_quirks },
     /* MSVC fails to compile empty array. */
@@ -1085,6 +1088,7 @@ static const struct vkd3d_debug_option vkd3d_config_options[] =
     {"one_time_submit", VKD3D_CONFIG_FLAG_ONE_TIME_SUBMIT},
     {"skip_null_sparse_tiles", VKD3D_CONFIG_FLAG_SKIP_NULL_SPARSE_TILES},
     {"queue_profile_extra", VKD3D_CONFIG_FLAG_QUEUE_PROFILE_EXTRA},
+    {"damage_not_zeroed_allocations", VKD3D_CONFIG_FLAG_DAMAGE_NOT_ZEROED_ALLOCATIONS},
 };
 
 static void vkd3d_config_flags_init_once(void)
@@ -2095,6 +2099,21 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
         vk_prepend_struct(&info->features2, &info->optical_flow_nv_features);
     }
 
+    if (vulkan_info->KHR_cooperative_matrix)
+    {
+        info->cooperative_matrix_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+        info->cooperative_matrix_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+        vk_prepend_struct(&info->features2, &info->cooperative_matrix_features);
+        vk_prepend_struct(&info->properties2, &info->cooperative_matrix_properties);
+    }
+
+    if (vulkan_info->EXT_zero_initialize_device_memory)
+    {
+        info->zero_initialize_device_memory_features.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ZERO_INITIALIZE_DEVICE_MEMORY_FEATURES_EXT;
+        vk_prepend_struct(&info->features2, &info->zero_initialize_device_memory_features);
+    }
+
     VK_CALL(vkGetPhysicalDeviceFeatures2(device->vk_physical_device, &info->features2));
     VK_CALL(vkGetPhysicalDeviceProperties2(device->vk_physical_device, &info->properties2));
 
@@ -2559,6 +2578,78 @@ static HRESULT vkd3d_init_device_extensions(struct d3d12_device *device,
     return S_OK;
 }
 
+static bool vkd3d_supports_minimum_coopmat_caps(struct d3d12_device *device)
+{
+    const struct vkd3d_vk_instance_procs *vk_procs = &device->vkd3d_instance->vk_procs;
+    VkCooperativeMatrixPropertiesKHR *props;
+    bool supports_f32_16x16x16_f16 = false;
+    bool supports_f16_16x16x16_f16 = false;
+    bool supports_u8_a = false;
+    bool supports_u8_b = false;
+    bool supports_u8_c = false;
+    uint32_t i, count;
+
+    /* There are no sub-capabilities (yet at least).
+     * Validate that we support everything that dxil-spirv can emit. */
+    if (VK_CALL(vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(
+            device->vk_physical_device, &count, NULL)) != VK_SUCCESS)
+    {
+        ERR("Failed to query cooperative matrix properties.\n");
+        return false;
+    }
+
+    props = vkd3d_calloc(count, sizeof(*props));
+    for (i = 0; i < count; i++)
+        props[i].sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+
+    if (VK_CALL(vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(
+            device->vk_physical_device, &count, props)) != VK_SUCCESS)
+    {
+        ERR("Failed to query cooperative matrix properties.\n");
+        vkd3d_free(props);
+        return false;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        const VkCooperativeMatrixPropertiesKHR *fmt = &props[i];
+
+        if (fmt->AType == VK_COMPONENT_TYPE_UINT8_KHR)
+            supports_u8_a = true;
+        if (fmt->BType == VK_COMPONENT_TYPE_UINT8_KHR)
+            supports_u8_b = true;
+        if (fmt->CType == VK_COMPONENT_TYPE_UINT8_KHR)
+            supports_u8_c = true;
+
+        if (fmt->KSize != 16 || fmt->MSize != 16 || fmt->NSize != 16 || fmt->scope != VK_SCOPE_SUBGROUP_KHR)
+            continue;
+
+        if (fmt->AType == VK_COMPONENT_TYPE_FLOAT16_KHR && fmt->BType == VK_COMPONENT_TYPE_FLOAT16_KHR)
+        {
+            if (fmt->CType == VK_COMPONENT_TYPE_FLOAT32_KHR)
+                supports_f32_16x16x16_f16 = true;
+            else if (fmt->CType == VK_COMPONENT_TYPE_FLOAT16_KHR)
+                supports_f16_16x16x16_f16 = true;
+        }
+    }
+
+    vkd3d_free(props);
+
+    if (!supports_f16_16x16x16_f16 || !supports_f32_16x16x16_f16 || !supports_u8_a || !supports_u8_b)
+    {
+        WARN("Missing sufficient features to expose WMMA.\n");
+        return false;
+    }
+
+    if (!supports_u8_c)
+    {
+        WARN("8-bit Accumulator type not exposed, but assuming it works anyway. "
+             "This is required for FSR4 and happens to work in practice on AMD GPUs.\n");
+    }
+
+    return true;
+}
+
 static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
         const struct vkd3d_device_create_info *create_info,
         struct vkd3d_physical_device_info *physical_device_info)
@@ -2633,13 +2724,13 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
     }
 
     /* Disable unused Vulkan features. The following features need to remain enabled
-     * for DXVK in order to support D3D11on12: hostQueryReset, vulkanMemoryModel. */
+     * for DXVK in order to support D3D11on12: hostQueryReset, vulkanMemoryModel.
+     * We need storageBuffer8BitAccess for DStorage fallback. */
     features->shaderTessellationAndGeometryPointSize = VK_FALSE;
 
     physical_device_info->vulkan_1_1_features.protectedMemory = VK_FALSE;
     physical_device_info->vulkan_1_1_features.samplerYcbcrConversion = VK_FALSE;
 
-    physical_device_info->vulkan_1_2_features.storageBuffer8BitAccess = VK_FALSE;
     physical_device_info->vulkan_1_2_features.uniformAndStorageBuffer8BitAccess = VK_FALSE;
     physical_device_info->vulkan_1_2_features.storagePushConstant8 = VK_FALSE;
     physical_device_info->vulkan_1_2_features.shaderInputAttachmentArrayDynamicIndexing = VK_FALSE;
@@ -2781,6 +2872,16 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
     {
         ERR("Push descriptors are not supported by this implementation. This is required for correct operation.\n");
         return E_INVALIDARG;
+    }
+
+    if (physical_device_info->cooperative_matrix_features.cooperativeMatrix)
+    {
+        if (!vkd3d_supports_minimum_coopmat_caps(device))
+        {
+            physical_device_info->cooperative_matrix_features.cooperativeMatrix = VK_FALSE;
+            physical_device_info->cooperative_matrix_features.cooperativeMatrixRobustBufferAccess = VK_FALSE;
+            vulkan_info->KHR_cooperative_matrix = false;
+        }
     }
 
     return S_OK;
@@ -3457,7 +3558,8 @@ static HRESULT d3d12_device_create_scratch_buffer(struct d3d12_device *device, e
             /* this flag cannot be used with the existing buffer heaps */
             alloc_info.explicit_global_buffer_usage =
                     VK_BUFFER_USAGE_2_PREPROCESS_BUFFER_BIT_EXT |
-                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
             /* Need this to override any type flags provided by heap properties.
              * BUFFER_USAGE_2_PREPROCESS_BUFFER implies 32-bit only types. */
@@ -3885,6 +3987,18 @@ static void d3d12_device_free_pipeline_libraries(struct d3d12_device *device)
     hash_map_free(&device->fragment_output_pipelines);
 }
 
+static void vkd3d_null_rtas_allocation_cleanup(
+        struct vkd3d_null_rtas_allocation *rtas, struct d3d12_device *device)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+
+    if (rtas->va)
+    {
+        VK_CALL(vkDestroyAccelerationStructureKHR(device->vk_device, rtas->rtas, NULL));
+        VK_CALL(vkDestroyBuffer(device->vk_device, rtas->buffer, NULL));
+        vkd3d_free_device_memory(device, &rtas->alloc);
+    }
+}
 
 static void d3d12_device_destroy(struct d3d12_device *device)
 {
@@ -3927,6 +4041,7 @@ static void d3d12_device_destroy(struct d3d12_device *device)
     vkd3d_bindless_state_cleanup(&device->bindless_state, device);
     d3d12_device_destroy_vkd3d_queues(device);
     VK_CALL(vkDestroySemaphore(device->vk_device, device->sparse_init_timeline, NULL));
+    vkd3d_null_rtas_allocation_cleanup(&device->null_rtas_allocation, device);
     vkd3d_memory_allocator_cleanup(&device->memory_allocator, device);
     vkd3d_memory_transfer_queue_cleanup(&device->memory_transfers);
     vkd3d_global_descriptor_buffer_cleanup(&device->global_descriptor_buffer, device);
@@ -5225,14 +5340,18 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
                 if (in_args->unknown2 == 1)
                 {
                     out_args->unknown0 = 1;
-                    /* Limit stream count to something reasonable. Given that we have a hard limit
-                     * on the number of tiles we can process in one call, we should make it unlikely
-                     * for applications to hit that upper limit even if they try. */
+                    /* Limit stream count to something reasonable. Given that we have a hard limit on the
+                     * number of tiles we can process in one call when using the NV_memory_decompression
+                     * path, we should make it unlikely for applications to hit that upper limit. */
                     out_args->max_stream_count = min(256u, in_args->stream_count);
-                    /* Reserve data for the indirect tile count, then the memory region for
-                     * each tile, and finally a compute workgroup count for each stream. */
-                    out_args->scratch_size = sizeof(struct d3d12_meta_command_dstorage_scratch_header) +
-                            sizeof(VkDispatchIndirectCommand) * out_args->max_stream_count;
+                    /* Reserve one set of dispatch parameters per stream. */
+                    out_args->scratch_size = sizeof(VkDispatchIndirectCommand) * out_args->max_stream_count;
+
+                    if (d3d12_device_use_nv_memory_decompression(device))
+                    {
+                        /* Additionally reserve storage for per-tile memory regions */
+                        out_args->scratch_size += sizeof(struct d3d12_meta_command_dstorage_scratch_header);
+                    }
                 }
 
                 return S_OK;
@@ -9117,6 +9236,7 @@ static void vkd3d_compute_shader_interface_key(struct d3d12_device *device)
      * We may generate different SPIR-V based on the bindless state flags.
      * The bindless states are affected by various flags. */
     unsigned int i;
+    char env[64];
     uint64_t key;
 
     key = hash_fnv1_init();
@@ -9170,6 +9290,12 @@ static void vkd3d_compute_shader_interface_key(struct d3d12_device *device)
     /* QA checks don't necessarily modify bindless flags, so have to check them separately. */
     hash_fnv1_iterate_u32(key, vkd3d_descriptor_debug_active_instruction_qa_checks());
     hash_fnv1_iterate_u32(key, vkd3d_descriptor_debug_active_descriptor_qa_checks());
+
+    if (vkd3d_get_env_var("DXIL_SPIRV_CONFIG", env, sizeof(env)))
+    {
+        INFO("Using DXIL_SPIRV_CONFIG = %s\n", env);
+        key = hash_fnv1_iterate_string(key, env);
+    }
 
     device->shader_interface_key = key;
 }
@@ -9604,6 +9730,15 @@ bool d3d12_device_validate_shader_meta(struct d3d12_device *device, const struct
                     meta->cs_wave_size_min, meta->cs_wave_size_max,
                     info->vulkan_1_3_properties.minSubgroupSize,
                     info->vulkan_1_3_properties.maxSubgroupSize);
+            return false;
+        }
+    }
+
+    if (meta->flags & VKD3D_SHADER_META_FLAG_USES_COOPERATIVE_MATRIX)
+    {
+        if (!device->device_info.cooperative_matrix_features.cooperativeMatrix)
+        {
+            ERR("Missing sufficient features to expose WMMA.\n");
             return false;
         }
     }
