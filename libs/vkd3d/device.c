@@ -122,6 +122,8 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION_COND(EXT_DEVICE_ADDRESS_BINDING_REPORT, EXT_device_address_binding_report, VKD3D_CONFIG_FLAG_FAULT),
     VK_EXTENSION(EXT_DEPTH_BIAS_CONTROL, EXT_depth_bias_control),
     VK_EXTENSION(EXT_ZERO_INITIALIZE_DEVICE_MEMORY, EXT_zero_initialize_device_memory),
+    VK_EXTENSION_COND(EXT_OPACITY_MICROMAP, EXT_opacity_micromap, VKD3D_CONFIG_FLAG_DXR_1_2),
+    VK_EXTENSION(EXT_SHADER_FLOAT8, EXT_shader_float8),
     /* AMD extensions */
     VK_EXTENSION(AMD_BUFFER_MARKER, AMD_buffer_marker),
     VK_EXTENSION(AMD_DEVICE_COHERENT_MEMORY, AMD_device_coherent_memory),
@@ -141,6 +143,7 @@ static const struct vkd3d_optional_extension_info optional_device_extensions[] =
     VK_EXTENSION(NV_DEVICE_GENERATED_COMMANDS_COMPUTE, NV_device_generated_commands_compute),
     VK_EXTENSION_VERSION(NV_LOW_LATENCY_2, NV_low_latency2, 2),
     VK_EXTENSION(NV_RAW_ACCESS_CHAINS, NV_raw_access_chains),
+    VK_EXTENSION(NV_COOPERATIVE_MATRIX_2, NV_cooperative_matrix2),
     /* VALVE extensions */
     VK_EXTENSION(VALVE_MUTABLE_DESCRIPTOR_TYPE, VALVE_mutable_descriptor_type),
     /* MESA extensions */
@@ -1041,6 +1044,7 @@ static const struct vkd3d_debug_option vkd3d_config_options[] =
     {"debug_utils", VKD3D_CONFIG_FLAG_DEBUG_UTILS},
     {"force_static_cbv", VKD3D_CONFIG_FLAG_FORCE_STATIC_CBV},
     {"dxr", VKD3D_CONFIG_FLAG_DXR},
+    {"dxr12", VKD3D_CONFIG_FLAG_DXR_1_2},
     {"nodxr", VKD3D_CONFIG_FLAG_NO_DXR},
     {"single_queue", VKD3D_CONFIG_FLAG_SINGLE_QUEUE},
     {"descriptor_qa_checks", VKD3D_CONFIG_FLAG_DESCRIPTOR_QA_CHECKS},
@@ -1449,6 +1453,12 @@ bool d3d12_device_supports_ray_tracing_tier_1_0(const struct d3d12_device *devic
     return device->device_info.acceleration_structure_features.accelerationStructure &&
             device->device_info.ray_tracing_pipeline_features.rayTracingPipeline &&
             device->d3d12_caps.options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0;
+}
+
+bool d3d12_device_supports_ray_tracing_tier_1_2(const struct d3d12_device *device)
+{
+    return device->device_info.opacity_micromap_features.micromap &&
+            device->d3d12_caps.options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_2;
 }
 
 bool d3d12_device_supports_variable_shading_rate_tier_1(struct d3d12_device *device)
@@ -2114,6 +2124,26 @@ static void vkd3d_physical_device_info_init(struct vkd3d_physical_device_info *i
         vk_prepend_struct(&info->features2, &info->zero_initialize_device_memory_features);
     }
 
+    if (vulkan_info->EXT_opacity_micromap)
+    {
+        info->opacity_micromap_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT;
+        vk_prepend_struct(&info->features2, &info->opacity_micromap_features);
+    }
+
+    if (vulkan_info->EXT_shader_float8)
+    {
+        info->shader_float8_features.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT8_FEATURES_EXT;
+        vk_prepend_struct(&info->features2, &info->shader_float8_features);
+    }
+
+    if (vulkan_info->NV_cooperative_matrix2)
+    {
+        info->cooperative_matrix2_features_nv.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV;
+        vk_prepend_struct(&info->features2, &info->cooperative_matrix2_features_nv);
+    }
+
     VK_CALL(vkGetPhysicalDeviceFeatures2(device->vk_physical_device, &info->features2));
     VK_CALL(vkGetPhysicalDeviceProperties2(device->vk_physical_device, &info->properties2));
 
@@ -2583,11 +2613,14 @@ static bool vkd3d_supports_minimum_coopmat_caps(struct d3d12_device *device)
     const struct vkd3d_vk_instance_procs *vk_procs = &device->vkd3d_instance->vk_procs;
     VkCooperativeMatrixPropertiesKHR *props;
     bool supports_f32_16x16x16_f16 = false;
-    bool supports_f16_16x16x16_f16 = false;
-    bool supports_u8_a = false;
-    bool supports_u8_b = false;
-    bool supports_u8_c = false;
+    bool supports_f32_16x16x16_f8 = false;
+    bool supports_8bit_a = false;
+    bool supports_8bit_b = false;
+    bool supports_8bit_c = false;
     uint32_t i, count;
+    bool fp8;
+
+    fp8 = device->device_info.shader_float8_features.shaderFloat8CooperativeMatrix == VK_TRUE;
 
     /* There are no sub-capabilities (yet at least).
      * Validate that we support everything that dxil-spirv can emit. */
@@ -2614,34 +2647,59 @@ static bool vkd3d_supports_minimum_coopmat_caps(struct d3d12_device *device)
     {
         const VkCooperativeMatrixPropertiesKHR *fmt = &props[i];
 
-        if (fmt->AType == VK_COMPONENT_TYPE_UINT8_KHR)
-            supports_u8_a = true;
-        if (fmt->BType == VK_COMPONENT_TYPE_UINT8_KHR)
-            supports_u8_b = true;
-        if (fmt->CType == VK_COMPONENT_TYPE_UINT8_KHR)
-            supports_u8_c = true;
+        if (fp8)
+        {
+            if (fmt->AType == VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT)
+                supports_8bit_a = true;
+            if (fmt->BType == VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT)
+                supports_8bit_b = true;
+            if (fmt->CType == VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT)
+                supports_8bit_c = true;
+        }
+        else
+        {
+            /* In the fallback, we use u8 as an intermediate format. */
+            if (fmt->AType == VK_COMPONENT_TYPE_UINT8_KHR)
+                supports_8bit_a = true;
+            if (fmt->BType == VK_COMPONENT_TYPE_UINT8_KHR)
+                supports_8bit_b = true;
+            if (fmt->CType == VK_COMPONENT_TYPE_UINT8_KHR)
+                supports_8bit_c = true;
+        }
 
         if (fmt->KSize != 16 || fmt->MSize != 16 || fmt->NSize != 16 || fmt->scope != VK_SCOPE_SUBGROUP_KHR)
             continue;
 
-        if (fmt->AType == VK_COMPONENT_TYPE_FLOAT16_KHR && fmt->BType == VK_COMPONENT_TYPE_FLOAT16_KHR)
+        if (fmt->CType == VK_COMPONENT_TYPE_FLOAT32_KHR)
         {
-            if (fmt->CType == VK_COMPONENT_TYPE_FLOAT32_KHR)
-                supports_f32_16x16x16_f16 = true;
-            else if (fmt->CType == VK_COMPONENT_TYPE_FLOAT16_KHR)
-                supports_f16_16x16x16_f16 = true;
+            if (fmt->AType == VK_COMPONENT_TYPE_FLOAT16_KHR && fmt->BType == VK_COMPONENT_TYPE_FLOAT16_KHR)
+            {
+                if (fmt->CType == VK_COMPONENT_TYPE_FLOAT32_KHR)
+                    supports_f32_16x16x16_f16 = true;
+            }
+            else if (fmt->AType == VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT && fmt->BType == VK_COMPONENT_TYPE_FLOAT8_E4M3_EXT)
+            {
+                if (fmt->CType == VK_COMPONENT_TYPE_FLOAT32_KHR)
+                    supports_f32_16x16x16_f8 = true;
+            }
         }
     }
 
     vkd3d_free(props);
 
-    if (!supports_f16_16x16x16_f16 || !supports_f32_16x16x16_f16 || !supports_u8_a || !supports_u8_b)
+    if (!supports_f32_16x16x16_f16 || !supports_8bit_a || !supports_8bit_b)
     {
         WARN("Missing sufficient features to expose WMMA.\n");
         return false;
     }
 
-    if (!supports_u8_c)
+    if (fp8 && !supports_f32_16x16x16_f8)
+    {
+        WARN("Missing sufficient features to expose WMMA.\n");
+        return false;
+    }
+
+    if (!supports_8bit_c)
     {
         WARN("8-bit Accumulator type not exposed, but assuming it works anyway. "
              "This is required for FSR4 and happens to work in practice on AMD GPUs.\n");
@@ -2880,7 +2938,18 @@ static HRESULT vkd3d_init_device_caps(struct d3d12_device *device,
         {
             physical_device_info->cooperative_matrix_features.cooperativeMatrix = VK_FALSE;
             physical_device_info->cooperative_matrix_features.cooperativeMatrixRobustBufferAccess = VK_FALSE;
+            physical_device_info->shader_float8_features.shaderFloat8 = VK_FALSE;
+            physical_device_info->shader_float8_features.shaderFloat8CooperativeMatrix = VK_FALSE;
+            physical_device_info->cooperative_matrix2_features_nv.cooperativeMatrixBlockLoads = VK_FALSE;
+            physical_device_info->cooperative_matrix2_features_nv.cooperativeMatrixConversions = VK_FALSE;
+            physical_device_info->cooperative_matrix2_features_nv.cooperativeMatrixFlexibleDimensions = VK_FALSE;
+            physical_device_info->cooperative_matrix2_features_nv.cooperativeMatrixPerElementOperations = VK_FALSE;
+            physical_device_info->cooperative_matrix2_features_nv.cooperativeMatrixReductions = VK_FALSE;
+            physical_device_info->cooperative_matrix2_features_nv.cooperativeMatrixTensorAddressing = VK_FALSE;
+            physical_device_info->cooperative_matrix2_features_nv.cooperativeMatrixWorkgroupScope = VK_FALSE;
             vulkan_info->KHR_cooperative_matrix = false;
+            vulkan_info->EXT_shader_float8 = false;
+            vulkan_info->NV_cooperative_matrix2 = false;
         }
     }
 
@@ -3778,6 +3847,16 @@ static HRESULT d3d12_device_create_query_pool(struct d3d12_device *device, uint3
             pool_info.queryCount = 128;
             break;
 
+        case VKD3D_QUERY_TYPE_INDEX_OMM_COMPACTED_SIZE:
+            pool_info.queryType = VK_QUERY_TYPE_MICROMAP_COMPACTED_SIZE_EXT;
+            pool_info.queryCount = 128;
+            break;
+
+        case VKD3D_QUERY_TYPE_INDEX_OMM_SERIALIZE_SIZE:
+            pool_info.queryType = VK_QUERY_TYPE_MICROMAP_SERIALIZATION_SIZE_EXT;
+            pool_info.queryCount = 128;
+            break;
+
         default:
             ERR("Unhandled query type %u.\n", type_index);
             return E_INVALIDARG;
@@ -3785,7 +3864,7 @@ static HRESULT d3d12_device_create_query_pool(struct d3d12_device *device, uint3
 
     if ((vr = VK_CALL(vkCreateQueryPool(device->vk_device, &pool_info, NULL, &pool->vk_query_pool))) < 0)
     {
-        ERR("Failed to create query pool, vr %u.\n", vr);
+        ERR("Failed to create query pool, vr %d.\n", vr);
         return hresult_from_vk_result(vr);
     }
 
@@ -5259,6 +5338,7 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CheckFeatureSupport(d3d12_device_i
             TRACE("MaxSamplerDescriptorHeapSize %u\n", data->MaxSamplerDescriptorHeapSize);
             TRACE("MaxSamplerDescriptorHeapSizeWithStaticSamplers %u\n", data->MaxSamplerDescriptorHeapSizeWithStaticSamplers);
             TRACE("MaxViewDescriptorHeapSize %u\n", data->MaxViewDescriptorHeapSize);
+            TRACE("ComputeOnlyCustomHeapSupported %u\n", data->ComputeOnlyCustomHeapSupported);
 
             return S_OK;
         }
@@ -7394,15 +7474,69 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CreateStateObject(d3d12_device_ifa
     }
 }
 
+static void d3d12_device_get_raytracing_opacity_micromap_array_prebuild_info(struct d3d12_device *device,
+        const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS *desc,
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO *info)
+{
+    const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
+    VkMicromapUsageEXT usages_stack[VKD3D_BUILD_INFO_STACK_COUNT];
+    VkMicromapBuildSizesInfoEXT size_info;
+    VkMicromapBuildInfoEXT build_info;
+    VkMicromapUsageEXT *usages;
+    uint32_t usages_count;
+
+    if (!d3d12_device_supports_ray_tracing_tier_1_2(device))
+    {
+        ERR("Opacity micromap is not supported. Calling this is invalid.\n");
+        memset(info, 0, sizeof(*info));
+        return;
+    }
+
+    usages_count = desc->pOpacityMicromapArrayDesc->NumOmmHistogramEntries;
+
+    if (usages_count > VKD3D_BUILD_INFO_STACK_COUNT)
+        usages = vkd3d_malloc(usages_count * sizeof(*usages));
+    else
+        usages = usages_stack;
+
+    if (!vkd3d_opacity_micromap_convert_inputs(device, desc, &build_info, usages))
+    {
+        ERR("Failed to convert inputs.\n");
+        memset(info, 0, sizeof(*info));
+        goto cleanup;
+    }
+
+    memset(&size_info, 0, sizeof(size_info));
+    size_info.sType = VK_STRUCTURE_TYPE_MICROMAP_BUILD_SIZES_INFO_EXT;
+
+    VK_CALL(vkGetMicromapBuildSizesEXT(device->vk_device,
+            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+            &build_info, &size_info));
+
+    info->ResultDataMaxSizeInBytes = size_info.micromapSize;
+    info->ScratchDataSizeInBytes = size_info.buildScratchSize;
+    info->UpdateScratchDataSizeInBytes = 0;
+
+    TRACE("ResultDataMaxSizeInBytes: %"PRIu64".\n", (uint64_t)info->ResultDataMaxSizeInBytes);
+    TRACE("ScratchDataSizeInBytes: %"PRIu64".\n", (uint64_t)info->ScratchDataSizeInBytes);
+
+cleanup:
+
+    if (usages_count > VKD3D_BUILD_INFO_STACK_COUNT)
+        vkd3d_free(usages);
+}
+
 static void STDMETHODCALLTYPE d3d12_device_GetRaytracingAccelerationStructurePrebuildInfo(d3d12_device_iface *iface,
         const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS *desc,
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO *info)
 {
     struct d3d12_device *device = impl_from_ID3D12Device(iface);
 
+    VkAccelerationStructureTrianglesOpacityMicromapEXT omms_stack[VKD3D_BUILD_INFO_STACK_COUNT];
     VkAccelerationStructureGeometryKHR geometries_stack[VKD3D_BUILD_INFO_STACK_COUNT];
     const struct vkd3d_vk_device_procs *vk_procs = &device->vk_procs;
     uint32_t primitive_counts_stack[VKD3D_BUILD_INFO_STACK_COUNT];
+    VkAccelerationStructureTrianglesOpacityMicromapEXT *omms;
     VkAccelerationStructureBuildGeometryInfoKHR build_info;
     VkAccelerationStructureBuildSizesInfoKHR size_info;
     VkAccelerationStructureGeometryKHR *geometries;
@@ -7418,18 +7552,26 @@ static void STDMETHODCALLTYPE d3d12_device_GetRaytracingAccelerationStructurePre
         return;
     }
 
+    if (desc->Type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_ARRAY)
+    {
+        d3d12_device_get_raytracing_opacity_micromap_array_prebuild_info(device, desc, info);
+        return;
+    }
+
     geometry_count = vkd3d_acceleration_structure_get_geometry_count(desc);
     primitive_counts = primitive_counts_stack;
     geometries = geometries_stack;
+    omms = omms_stack;
 
     if (geometry_count > VKD3D_BUILD_INFO_STACK_COUNT)
     {
         primitive_counts = vkd3d_malloc(geometry_count * sizeof(*primitive_counts));
         geometries = vkd3d_malloc(geometry_count * sizeof(*geometries));
+        omms = vkd3d_malloc(geometry_count * sizeof(*omms));
     }
 
     if (!vkd3d_acceleration_structure_convert_inputs(device,
-            desc, &build_info, geometries, NULL, primitive_counts))
+            desc, &build_info, geometries, omms, NULL, primitive_counts))
     {
         ERR("Failed to convert inputs.\n");
         memset(info, 0, sizeof(*info));
@@ -7459,6 +7601,7 @@ cleanup:
     {
         vkd3d_free(primitive_counts);
         vkd3d_free(geometries);
+        vkd3d_free(omms);
     }
 }
 
@@ -8246,6 +8389,12 @@ static D3D12_RAYTRACING_TIER d3d12_device_determine_ray_tracing_tier(struct d3d1
         }
     }
 
+    if (tier == D3D12_RAYTRACING_TIER_1_1 && info->opacity_micromap_features.micromap)
+    {
+        INFO("DXR 1.2 support enabled.\n");
+        tier = D3D12_RAYTRACING_TIER_1_2;
+    }
+
     return tier;
 }
 
@@ -8659,6 +8808,7 @@ static void d3d12_device_caps_init_feature_options19(struct d3d12_device *device
     options19->MaxSamplerDescriptorHeapSize = d3d12_device_get_max_descriptor_heap_size(device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     options19->MaxSamplerDescriptorHeapSizeWithStaticSamplers = options19->MaxSamplerDescriptorHeapSize;
     options19->MaxViewDescriptorHeapSize = d3d12_device_get_max_descriptor_heap_size(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    options19->ComputeOnlyCustomHeapSupported = FALSE;
 }
 
 static void d3d12_device_caps_init_feature_options20(struct d3d12_device *device)
@@ -9228,6 +9378,24 @@ static void vkd3d_init_shader_extensions(struct d3d12_device *device)
         device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
                 VKD3D_SHADER_TARGET_EXTENSION_RAW_ACCESS_CHAINS_NV;
     }
+
+    if (device->device_info.opacity_micromap_features.micromap)
+    {
+        device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
+                VKD3D_SHADER_TARGET_EXTENSION_OPACITY_MICROMAP;
+    }
+
+    if (device->device_info.shader_float8_features.shaderFloat8CooperativeMatrix)
+    {
+        device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
+                VKD3D_SHADER_TARGET_EXTENSION_WMMA_FP8;
+    }
+
+    if (device->device_info.cooperative_matrix2_features_nv.cooperativeMatrixConversions)
+    {
+        device->vk_info.shader_extensions[device->vk_info.shader_extension_count++] =
+                VKD3D_SHADER_TARGET_EXTENSION_NV_COOPMAT2_CONVERSIONS;
+    }
 }
 
 static void vkd3d_compute_shader_interface_key(struct d3d12_device *device)
@@ -9739,6 +9907,15 @@ bool d3d12_device_validate_shader_meta(struct d3d12_device *device, const struct
         if (!device->device_info.cooperative_matrix_features.cooperativeMatrix)
         {
             ERR("Missing sufficient features to expose WMMA.\n");
+            return false;
+        }
+    }
+
+    if (meta->flags & VKD3D_SHADER_META_FLAG_USES_COOPERATIVE_MATRIX_FP8)
+    {
+        if (!device->device_info.shader_float8_features.shaderFloat8CooperativeMatrix)
+        {
+            ERR("Missing sufficient features to expose WMMA FP8.\n");
             return false;
         }
     }

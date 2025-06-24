@@ -5135,16 +5135,32 @@ void test_wmma_matmul(void)
     for (test_index = 0; test_index < ARRAY_SIZE(tests); test_index++)
     {
         unsigned int elem_stride = tests[test_index].quant.element_stride;
+        bool test_is_native_fp8;
         float A[16][16];
         float B[16][16];
         float C[16][16];
 
+        test_is_native_fp8 = is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8") &&
+                (tests[test_index].a.type == TYPE_FP8 || tests[test_index].b.type == TYPE_FP8 ||
+                 tests[test_index].c.type == TYPE_FP8 || tests[test_index].quant.type == TYPE_FP8);
+
         vkd3d_test_set_context("Test %u", test_index);
-        if (test_index == 1)
+
+        if (test_is_native_fp8)
+        {
+            vkd3d_mute_validation_message("10163", "See VVL issue 10306.");
+            vkd3d_mute_validation_message("10060", "See VVL issue 10306.");
+        }
+        else if (test_index == 1)
             vkd3d_mute_validation_message("10163", "Currently just assuming that 8-bit Acc matrix works.");
+
         pso = create_wmma_pso(context.device, context.root_signature, *tests[test_index].dxil);
-        if (test_index == 1)
+
+        if (test_is_native_fp8 || test_index == 1)
             vkd3d_unmute_validation_message("10163");
+        if (test_is_native_fp8)
+            vkd3d_unmute_validation_message("10060");
+
         if (!pso)
             continue;
 
@@ -5252,7 +5268,7 @@ void test_wmma_matmul(void)
 void test_wmma_multi_matmul(void)
 {
     uint8_t xyz_reference_fp16_quant[16][16];
-    uint8_t yz_reference_fp16_quant[16][16];
+    float yz_reference_fp16_quant[16][16];
     D3D12_ROOT_SIGNATURE_DESC rs_desc;
     D3D12_ROOT_PARAMETER rs_param[3];
     uint8_t input_data[16 * 16 * 3];
@@ -5263,6 +5279,7 @@ void test_wmma_multi_matmul(void)
     ID3D12Resource *output;
     ID3D12Resource *input;
     unsigned int i, j, k;
+    int emul_slack;
 
 #include "shaders/sm_advanced/headers/cs_wmma_multi_matmul.h"
 
@@ -5298,9 +5315,14 @@ void test_wmma_multi_matmul(void)
 
     create_root_signature(context.device, &rs_desc, &context.root_signature);
 
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_mute_validation_message("10060", "See VVL issue 10306.");
     vkd3d_mute_validation_message("10163", "Currently just assuming that 8-bit Acc matrix works.");
     context.pipeline_state = create_wmma_pso(context.device, context.root_signature, cs_wmma_multi_matmul_dxil);
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_unmute_validation_message("10060");
     vkd3d_unmute_validation_message("10163");
+
 
     if (!context.pipeline_state)
     {
@@ -5346,7 +5368,9 @@ void test_wmma_multi_matmul(void)
             /* Ensure we're not just testing inf clamped values. */
             ok(fabsf(res) <= 448.0f, "res %f is out of range.\n", res);
             yz_reference[j][i] = float_to_fp8(res);
-            yz_reference_fp16_quant[j][i] = float_to_fp8(quant_fp16(res));
+
+            /* If we don't support FP8 natively, we can just quant to FP16 instead of FP8. */
+            yz_reference_fp16_quant[j][i] = quant_fp16(res);
         }
     }
 
@@ -5364,7 +5388,7 @@ void test_wmma_multi_matmul(void)
                 uint8_t x = input_data[k + 16 * j];
                 uint8_t yz = yz_reference[k][i];
                 res += fp8_to_float(x) * fp8_to_float(yz);
-                res_fp16_quant += fp8_to_float(x) * fp8_to_float(yz_reference_fp16_quant[k][i]);
+                res_fp16_quant += fp8_to_float(x) * yz_reference_fp16_quant[k][i];
             }
 
             /* Ensure we're not just testing inf clamped values. */
@@ -5373,6 +5397,9 @@ void test_wmma_multi_matmul(void)
             xyz_reference_fp16_quant[j][i] = float_to_fp8(quant_fp16(res_fp16_quant));
         }
     }
+
+    /* Slight imprecisions in the FP16 work might lead to some errors on RDNA3. */
+    emul_slack = is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8") ? 0 : 8;
 
     for (j = 0; j < 16; j++)
     {
@@ -5384,7 +5411,7 @@ void test_wmma_multi_matmul(void)
             uint8_t value;
 
             value = get_readback_uint8(&rb, j + i * 16, 0);
-            ok(value == expected || value == expected_alt,
+            ok(value == expected || (emul_slack && abs(value - expected_alt) <= emul_slack),
                     "row %u, col %u: Expected 0x%02x, got 0x%02x\n", j, i, expected, value);
         }
     }
@@ -5430,7 +5457,12 @@ void test_wmma_fp8_fp32_conversions(void)
 
     create_root_signature(context.device, &rs_desc, &context.root_signature);
 
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_mute_validation_message("10163", "See VVL issue 10306.");
     context.pipeline_state = create_wmma_pso(context.device, context.root_signature, cs_wmma_fp8_fp32_conversions_dxil);
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_unmute_validation_message("10163");
+
     if (!context.pipeline_state)
     {
         destroy_test_context(&context);
@@ -5544,6 +5576,124 @@ void test_wmma_fp32_fp8_conversions(void)
     destroy_test_context(&context);
 }
 
+void test_wmma_fp32_fp8_special_conversions(void)
+{
+    D3D12_ROOT_SIGNATURE_DESC rs_desc;
+    D3D12_ROOT_PARAMETER rs_param[3];
+    struct resource_readback rb;
+    struct test_context context;
+    bool supports_vk_float8;
+    ID3D12Resource *output;
+    ID3D12Resource *input;
+    unsigned int i;
+
+    static const uint32_t fp32_values[] =
+    {
+        0x7f7fffff, 0x7f800000, 0x7fffffff,
+        0xff7fffff, 0xff800000, 0xffffffff,
+    };
+
+#include "shaders/sm_advanced/headers/cs_wmma_fp32_fp8_special_conversions.h"
+
+    if (!init_compute_test_context(&context))
+        return;
+
+    if (!is_vkd3d_proton_device(context.device) && !is_amd_windows_device(context.device))
+    {
+        skip("WMMA tests can only work on AMD due to AGS.\n");
+        /* Technically we have to check for RDNA4 too, but on Windows, this is mostly just an exploratory test. */
+        destroy_test_context(&context);
+        return;
+    }
+
+    memset(rs_param, 0, sizeof(rs_param));
+    memset(&rs_desc, 0, sizeof(rs_desc));
+    rs_param[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_param[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_param[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_param[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    rs_param[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    rs_param[1].Descriptor.RegisterSpace = 0x7fff0ade;
+    rs_param[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rs_desc.NumParameters = ARRAY_SIZE(rs_param);
+    rs_desc.pParameters = rs_param;
+
+    create_root_signature(context.device, &rs_desc, &context.root_signature);
+
+    vkd3d_mute_validation_message("10163", "Currently just assuming that 8-bit Acc matrix works.");
+    context.pipeline_state = create_wmma_pso(context.device, context.root_signature, cs_wmma_fp32_fp8_special_conversions_dxil);
+    vkd3d_unmute_validation_message("10163");
+    todo ok(context.pipeline_state, "Failed to create PSO.\n");
+    if (!context.pipeline_state)
+    {
+        destroy_test_context(&context);
+        return;
+    }
+
+    input = create_upload_buffer(context.device, sizeof(fp32_values), fp32_values);
+
+    output = create_default_buffer(context.device, ARRAY_SIZE(fp32_values) * sizeof(uint32_t) * 2,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+    ID3D12GraphicsCommandList_SetComputeRootSignature(context.list, context.root_signature);
+    ID3D12GraphicsCommandList_SetPipelineState(context.list, context.pipeline_state);
+    ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(context.list, 0, ID3D12Resource_GetGPUVirtualAddress(output));
+    ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(context.list, 1, ID3D12Resource_GetGPUVirtualAddress(output));
+    ID3D12GraphicsCommandList_SetComputeRootShaderResourceView(context.list, 2, ID3D12Resource_GetGPUVirtualAddress(input));
+    ID3D12GraphicsCommandList_Dispatch(context.list, ARRAY_SIZE(fp32_values), 1, 1);
+    transition_resource_state(context.list, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    get_buffer_readback_with_command_list(output, DXGI_FORMAT_UNKNOWN, &rb, context.queue, context.list);
+
+    supports_vk_float8 = is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8");
+
+    /* Test every possible FP16 value in this range. */
+    for (i = 0; i < ARRAY_SIZE(fp32_values); i++)
+    {
+        uint8_t expected_unclamped, expected_clamped, expected_clamped_alt;
+        uint8_t value_unclamped, value_clamped;
+
+        value_unclamped = get_readback_uint(&rb, 2 * i, 0, 0);
+        value_clamped = get_readback_uint(&rb, 2 * i + 1, 0, 0);
+        expected_unclamped = i < ARRAY_SIZE(fp32_values) / 2 ? 0x7f : 0xff;
+        expected_clamped = i < ARRAY_SIZE(fp32_values) / 2 ? 0x7e : 0xfe;
+
+        if (i % 3 == 2)
+        {
+            /* NaN inputs always resolve to -nan somehow ... */
+            expected_unclamped = 0xff;
+            expected_clamped = 0xff;
+        }
+        else if (i % 3 == 1)
+        {
+            /* Clamped conversions from +/- inf is bugged, and resolve to NaN. */
+            expected_clamped = i < ARRAY_SIZE(fp32_values) / 2 ? 0x7f : 0xff;
+        }
+
+        expected_clamped_alt = expected_clamped;
+
+        /* The saturation fixup we do forces inf to NaN, where we always end up with 0xff pattern. */
+        if (i % 3 == 1 && supports_vk_float8)
+            expected_clamped_alt = 0xff;
+
+        todo_if(i % 3 == 2 || !supports_vk_float8)
+        ok(value_unclamped == expected_unclamped,
+                    "FP32 unclamped (#%x) -> FP8: Expected 0x%x, got 0x%x\n",
+                    fp32_values[i], expected_unclamped, value_unclamped);
+        todo_if(i % 3 == 2 || !supports_vk_float8)
+        ok(value_clamped == expected_clamped || value_clamped == expected_clamped_alt,
+                    "FP32 clamped (#%x) -> FP8: Expected 0x%x, got 0x%x\n",
+                    fp32_values[i], expected_clamped, value_clamped);
+    }
+
+    reset_command_list(context.list, context.allocator);
+    ID3D12Resource_Release(input);
+    ID3D12Resource_Release(output);
+    release_resource_readback(&rb);
+    vkd3d_test_set_context(NULL);
+
+    destroy_test_context(&context);
+}
+
 void test_wmma_matrix_length(void)
 {
     D3D12_ROOT_SIGNATURE_DESC rs_desc;
@@ -5578,7 +5728,11 @@ void test_wmma_matrix_length(void)
 
     create_root_signature(context.device, &rs_desc, &context.root_signature);
 
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_mute_validation_message("10163", "See VVL issue 10306.");
     context.pipeline_state = create_wmma_pso(context.device, context.root_signature, cs_wmma_matrix_length_dxil);
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_unmute_validation_message("10163");
     todo ok(context.pipeline_state, "Failed to create PSO.\n");
     if (!context.pipeline_state)
     {
@@ -5662,7 +5816,11 @@ void test_wmma_extract_insert(void)
 
     create_root_signature(context.device, &rs_desc, &context.root_signature);
 
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_mute_validation_message("10163", "See VVL issue 10306.");
     context.pipeline_state = create_wmma_pso(context.device, context.root_signature, cs_wmma_extract_insert_dxil);
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_unmute_validation_message("10163");
     todo ok(context.pipeline_state, "Failed to create PSO.\n");
     if (!context.pipeline_state)
     {
@@ -5826,7 +5984,11 @@ void test_wmma_lds_layout(void)
 
     create_root_signature(context.device, &rs_desc, &context.root_signature);
 
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_mute_validation_message("10163", "See VVL issue 10306.");
     context.pipeline_state = create_wmma_pso(context.device, context.root_signature, cs_wmma_lds_layout_dxil);
+    if (is_vk_device_extension_supported(context.device, "VK_EXT_shader_float8"))
+        vkd3d_unmute_validation_message("10163");
     todo ok(context.pipeline_state, "Failed to create PSO.\n");
     if (!context.pipeline_state)
     {
@@ -6129,6 +6291,253 @@ void test_wmma_layout_assumptions(void)
     ID3D12Resource_Release(input);
     ID3D12Resource_Release(output);
     release_resource_readback(&rb);
+
+    destroy_test_context(&context);
+}
+
+void test_wmma_special_conversions(void)
+{
+    D3D12_ROOT_SIGNATURE_DESC rs_desc;
+    D3D12_ROOT_PARAMETER rs_param[3];
+    uint8_t input_data[16 * 16];
+    struct resource_readback rb;
+    struct test_context context;
+    ID3D12Resource *output;
+    ID3D12Resource *input;
+    unsigned int i;
+
+#include "shaders/sm_advanced/headers/cs_wmma_special_conversions.h"
+
+    if (!init_compute_test_context(&context))
+        return;
+
+    if (!is_vkd3d_proton_device(context.device) && !is_amd_windows_device(context.device))
+    {
+        skip("WMMA tests can only work on AMD due to AGS.\n");
+        /* Technically we have to check for RDNA4 too, but on Windows, this is mostly just an exploratory test. */
+        destroy_test_context(&context);
+        return;
+    }
+
+    memset(rs_param, 0, sizeof(rs_param));
+    memset(&rs_desc, 0, sizeof(rs_desc));
+    rs_param[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_param[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_param[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_param[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rs_param[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    rs_param[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    rs_param[2].Descriptor.RegisterSpace = 0x7fff0ade;
+    rs_desc.NumParameters = ARRAY_SIZE(rs_param);
+    rs_desc.pParameters = rs_param;
+
+    create_root_signature(context.device, &rs_desc, &context.root_signature);
+    vkd3d_mute_validation_message("10163", "Currently just assuming that 8-bit Acc matrix works.");
+    context.pipeline_state = create_wmma_pso(context.device, context.root_signature, cs_wmma_special_conversions_dxil);
+    vkd3d_unmute_validation_message("10163");
+    todo ok(context.pipeline_state, "Failed to create PSO.\n");
+    if (!context.pipeline_state)
+    {
+        destroy_test_context(&context);
+        return;
+    }
+
+    output = create_default_buffer(context.device, 16 * 16 * sizeof(float), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+    for (i = 0; i < 256; i++)
+        input_data[i] = (i & 0x7f) == 0x7f ? 0 : i;
+    input = create_upload_buffer(context.device, sizeof(input_data), input_data);
+
+    ID3D12GraphicsCommandList_SetComputeRootSignature(context.list, context.root_signature);
+    ID3D12GraphicsCommandList_SetPipelineState(context.list, context.pipeline_state);
+    ID3D12GraphicsCommandList_SetComputeRootShaderResourceView(context.list, 0, ID3D12Resource_GetGPUVirtualAddress(input));
+    ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(context.list, 1, ID3D12Resource_GetGPUVirtualAddress(output));
+    ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(context.list, 2, ID3D12Resource_GetGPUVirtualAddress(output));
+    ID3D12GraphicsCommandList_Dispatch(context.list, 1, 1, 1);
+    transition_resource_state(context.list, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    get_buffer_readback_with_command_list(output, DXGI_FORMAT_UNKNOWN, &rb, context.queue, context.list);
+
+    for (i = 0; i < 256; i++)
+    {
+        float value = get_readback_float(&rb, i, 0);
+        float expected = (i & 0x7f) == 0x7f ? 0.0f : fp8_to_float(input_data[i]);
+        ok(value == expected, "Value %u: Expected %f, got %f\n", i, expected, value);
+    }
+
+    reset_command_list(context.list, context.allocator);
+    ID3D12Resource_Release(input);
+    ID3D12Resource_Release(output);
+    release_resource_readback(&rb);
+
+    destroy_test_context(&context);
+}
+
+void test_vs_instance_input_nonuniform_workarounds(void)
+{
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc;
+    D3D12_INPUT_ELEMENT_DESC element_desc[2];
+    D3D12_STREAM_OUTPUT_BUFFER_VIEW so_view;
+    struct test_context_desc context_desc;
+    D3D12_INPUT_LAYOUT_DESC input_layout;
+    D3D12_SO_DECLARATION_ENTRY so_entry;
+    D3D12_DESCRIPTOR_RANGE rs_range[1];
+    D3D12_ROOT_SIGNATURE_DESC rs_desc;
+    D3D12_VERTEX_BUFFER_VIEW vbvs[2];
+    D3D12_ROOT_PARAMETER rs_param[2];
+    ID3D12Resource *instance_input;
+    struct test_context context;
+    struct resource_readback rb;
+    ID3D12Resource *vert_input;
+    ID3D12DescriptorHeap *heap;
+    ID3D12Resource *output;
+    UINT so_stride = 16;
+    ID3D12Resource *cbv;
+    unsigned int i, j;
+    HRESULT hr;
+
+#include "shaders/sm_advanced/headers/vs_instance_input_nonuniform_workarounds.h"
+
+    uint32_t instance_data[4];
+    uint32_t vert_data[3];
+
+    struct vec4 cbv_data[ARRAY_SIZE(instance_data) * (256 / sizeof(struct vec4))];
+
+    for (i = 0; i < ARRAY_SIZE(vert_data); i++)
+        vert_data[i] = i;
+
+    for (i = 0; i < ARRAY_SIZE(instance_data); i++)
+    {
+        instance_data[i] = i;
+        cbv_data[(256 / sizeof(struct vec4)) * i].x = 1.0f + i;
+        cbv_data[(256 / sizeof(struct vec4)) * i].y = 1.0f + i;
+        cbv_data[(256 / sizeof(struct vec4)) * i].z = 1.0f + i;
+        cbv_data[(256 / sizeof(struct vec4)) * i].w = 1.0f + i;
+    }
+
+    memset(&context_desc, 0, sizeof(context_desc));
+    context_desc.no_pipeline = true;
+    context_desc.no_render_target = true;
+    context_desc.no_root_signature = true;
+
+    if (!init_test_context(&context, &context_desc))
+        return;
+
+    vert_input = create_upload_buffer(context.device, sizeof(vert_data), vert_data);
+    instance_input = create_upload_buffer(context.device, sizeof(instance_data), instance_data);
+    cbv = create_upload_buffer(context.device, sizeof(cbv_data), cbv_data);
+    output = create_default_buffer(context.device, ARRAY_SIZE(vert_data) * ARRAY_SIZE(instance_data) * sizeof(struct vec4) + 16, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COMMON);
+
+    heap = create_gpu_descriptor_heap(context.device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, ARRAY_SIZE(instance_data));
+
+    memset(&rs_desc, 0, sizeof(rs_desc));
+    memset(rs_param, 0, sizeof(rs_param));
+    memset(rs_range, 0, sizeof(rs_range));
+
+    rs_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT;
+    rs_desc.NumParameters = ARRAY_SIZE(rs_param);
+    rs_desc.pParameters = rs_param;
+    rs_param[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    rs_param[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    rs_param[0].DescriptorTable.NumDescriptorRanges = ARRAY_SIZE(rs_range);
+    rs_param[0].DescriptorTable.pDescriptorRanges = rs_range;
+    rs_range[0].NumDescriptors = ARRAY_SIZE(instance_data);
+    rs_range[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+    rs_param[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    rs_param[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    rs_param[1].Descriptor.RegisterSpace = 1;
+
+    create_root_signature(context.device, &rs_desc, &context.root_signature);
+
+    memset(&input_layout, 0, sizeof(input_layout));
+    memset(element_desc, 0, sizeof(element_desc));
+    input_layout.NumElements = ARRAY_SIZE(element_desc);
+    input_layout.pInputElementDescs = element_desc;
+    element_desc[0].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+    element_desc[0].Format = DXGI_FORMAT_R32_UINT;
+    element_desc[0].InputSlot = 0;
+    element_desc[0].SemanticName = "PERVERTEX";
+    element_desc[1].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
+    element_desc[1].Format = DXGI_FORMAT_R32_UINT;
+    element_desc[1].InputSlot = 1;
+    element_desc[1].SemanticName = "PERINSTANCE";
+    element_desc[1].InstanceDataStepRate = 1;
+
+    init_pipeline_state_desc(&pso_desc, context.root_signature, DXGI_FORMAT_UNKNOWN,
+            &vs_instance_input_nonuniform_workarounds_dxil, NULL, &input_layout);
+    memset(&pso_desc.PS, 0, sizeof(pso_desc.PS));
+    pso_desc.NumRenderTargets = 0;
+    pso_desc.StreamOutput.pSODeclaration = &so_entry;
+    pso_desc.StreamOutput.pBufferStrides = &so_stride;
+    pso_desc.StreamOutput.NumEntries = 1;
+    pso_desc.StreamOutput.NumStrides = 1;
+    pso_desc.StreamOutput.RasterizedStream = 0;
+    memset(&so_entry, 0, sizeof(so_entry));
+    so_entry.ComponentCount = 4;
+    so_entry.SemanticName = "SV_Position";
+
+    for (i = 0; i < ARRAY_SIZE(instance_data); i++)
+    {
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc;
+        cbv_desc.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(cbv) + 256 * i;
+        cbv_desc.SizeInBytes = 256;
+        ID3D12Device_CreateConstantBufferView(context.device, &cbv_desc, get_cpu_descriptor_handle(&context, heap, i));
+    }
+
+    hr = ID3D12Device_CreateGraphicsPipelineState(context.device, &pso_desc, &IID_ID3D12PipelineState, (void **)&context.pipeline_state);
+    ok(SUCCEEDED(hr), "Failed to create PSO, hr #%x\n", hr);
+
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(context.list, context.root_signature);
+    ID3D12GraphicsCommandList_SetDescriptorHeaps(context.list, 1, &heap);
+    ID3D12GraphicsCommandList_SetPipelineState(context.list, context.pipeline_state);
+    ID3D12GraphicsCommandList_IASetPrimitiveTopology(context.list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(context.list, 0, ID3D12DescriptorHeap_GetGPUDescriptorHandleForHeapStart(heap));
+    ID3D12GraphicsCommandList_SetGraphicsRootShaderResourceView(context.list, 1, ID3D12Resource_GetGPUVirtualAddress(instance_input));
+
+    so_view.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(output);
+    so_view.BufferFilledSizeLocation = so_view.BufferLocation + ARRAY_SIZE(vert_data) * ARRAY_SIZE(instance_data) * sizeof(struct vec4);
+    so_view.SizeInBytes = ARRAY_SIZE(vert_data) * ARRAY_SIZE(instance_data) * sizeof(struct vec4);
+    ID3D12GraphicsCommandList_SOSetTargets(context.list, 0, 1, &so_view);
+
+    memset(vbvs, 0, sizeof(vbvs));
+    vbvs[0].BufferLocation = ID3D12Resource_GetGPUVirtualAddress(vert_input);
+    vbvs[0].StrideInBytes = 4;
+    vbvs[0].SizeInBytes = sizeof(vert_data);
+    vbvs[1].BufferLocation = ID3D12Resource_GetGPUVirtualAddress(instance_input);
+    vbvs[1].StrideInBytes = 4;
+    vbvs[1].SizeInBytes = sizeof(instance_data);
+    ID3D12GraphicsCommandList_IASetVertexBuffers(context.list, 0, ARRAY_SIZE(vbvs), vbvs);
+    ID3D12GraphicsCommandList_DrawInstanced(context.list, ARRAY_SIZE(vert_data), ARRAY_SIZE(instance_data), 0, 0);
+
+    transition_resource_state(context.list, output, D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    get_buffer_readback_with_command_list(output, DXGI_FORMAT_UNKNOWN, &rb, context.queue, context.list);
+
+    for (j = 0; j < ARRAY_SIZE(instance_data); j++)
+    {
+        for (i = 0; i < ARRAY_SIZE(vert_data); i++)
+        {
+            const struct vec4 *v = get_readback_vec4(&rb, j * ARRAY_SIZE(vert_data) + i, 0);
+            struct vec4 expected;
+
+            expected.x = j + 1;
+            expected.y = j + 1;
+            expected.z = j + 1;
+            expected.w = j + 1;
+            expected.w += i;
+
+            ok(compare_vec4(&expected, v, 0),
+                "v: %d, i: %d, expected (%f, %f, %f, %f), got (%f, %f, %f, %f)\n",
+                i, j, expected.x, expected.y, expected.z, expected.w,
+                v->x, v->y, v->z, v->w);
+        }
+    }
+
+    release_resource_readback(&rb);
+    ID3D12DescriptorHeap_Release(heap);
+    ID3D12Resource_Release(vert_input);
+    ID3D12Resource_Release(instance_input);
+    ID3D12Resource_Release(cbv);
+    ID3D12Resource_Release(output);
 
     destroy_test_context(&context);
 }
