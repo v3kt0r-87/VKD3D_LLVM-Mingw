@@ -818,6 +818,16 @@ static const struct vkd3d_shader_quirk_info satisfactory_quirks = {
     satisfactory_hashes, ARRAY_SIZE(satisfactory_hashes), 0,
 };
 
+static const struct vkd3d_shader_quirk_hash deadspace_hashes[] = {
+    /* Shader calculates derivatives in non-uniform control flow,
+     * leading to NaN pixels on Nvidia GPUs. */
+    { 0x8b981fdafe14b649, VKD3D_SHADER_QUIRK_HOIST_DERIVATIVES },
+};
+
+static const struct vkd3d_shader_quirk_info deadspace_quirks = {
+    deadspace_hashes, ARRAY_SIZE(deadspace_hashes), 0,
+};
+
 static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
     /* F1 2020 (1080110) */
     { VKD3D_STRING_COMPARE_EXACT, "F1_2020_dx12.exe", &f1_2019_2020_quirks },
@@ -874,6 +884,8 @@ static const struct vkd3d_shader_quirk_meta application_shader_quirks[] = {
     { VKD3D_STRING_COMPARE_EXACT, "FactoryGameEGS-Win64-Shipping.exe", &satisfactory_quirks },
     /* Unreal Engine 4 */
     { VKD3D_STRING_COMPARE_ENDS_WITH, "-Shipping.exe", &ue4_quirks },
+    /* Dead Space (2023) */
+    { VKD3D_STRING_COMPARE_ENDS_WITH, "Dead Space.exe", &deadspace_quirks },
     /* MSVC fails to compile empty array. */
     { VKD3D_STRING_COMPARE_NEVER, NULL, NULL },
 };
@@ -7462,8 +7474,10 @@ static HRESULT STDMETHODCALLTYPE d3d12_device_CreateStateObject(d3d12_device_ifa
 
     if (desc->Type == D3D12_STATE_OBJECT_TYPE_EXECUTABLE)
     {
-        FIXME("Workgraph PSOs currently not supported.\n");
-        return E_NOTIMPL;
+        struct d3d12_wg_state_object *state;
+        if (FAILED(hr = d3d12_wg_state_object_create(device, desc, &state)))
+            return hr;
+        return return_interface(&state->ID3D12StateObject_iface, &IID_ID3D12StateObject, iid, state_object);
     }
     else
     {
@@ -8823,7 +8837,11 @@ static void d3d12_device_caps_init_feature_options21(struct d3d12_device *device
 {
     D3D12_FEATURE_DATA_D3D12_OPTIONS21 *options21 = &device->d3d12_caps.options21;
 
-    options21->WorkGraphsTier = D3D12_WORK_GRAPHS_TIER_NOT_SUPPORTED;
+    /* Enable WGs in test suite to avoid bitrot. */
+    options21->WorkGraphsTier = ((vkd3d_config_flags & VKD3D_CONFIG_FLAG_ENABLE_EXPERIMENTAL_FEATURES) ||
+            vkd3d_debug_control_is_test_suite()) &&
+            device->device_info.shader_maximal_reconvergence_features.shaderMaximalReconvergence ?
+            D3D12_WORK_GRAPHS_TIER_1_0 : D3D12_WORK_GRAPHS_TIER_NOT_SUPPORTED;
     options21->ExecuteIndirectTier = device->device_info.device_generated_commands_features_ext.deviceGeneratedCommands ?
             D3D12_EXECUTE_INDIRECT_TIER_1_1 : D3D12_EXECUTE_INDIRECT_TIER_1_0;
     options21->SampleCmpGradientAndBiasSupported = device->d3d12_caps.max_shader_model >= D3D_SHADER_MODEL_6_8 &&
